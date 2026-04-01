@@ -20,7 +20,7 @@ import traceback
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
@@ -36,6 +36,55 @@ from rich.traceback import install
 
 install(show_locals=False)
 console = Console()
+
+# ── Value history for 30-day change tracking ──────────────────────────────
+
+HISTORY_FILE = Path(".fantasy_value_history.json")
+
+
+def load_value_history() -> dict[str, dict]:
+    """Load 30-day value history from file."""
+    if HISTORY_FILE.exists():
+        try:
+            return json.loads(HISTORY_FILE.read_text())
+        except Exception:
+            return {}
+    return {}
+
+
+def save_value_history(history: dict[str, dict]) -> None:
+    """Save value history to file."""
+    try:
+        HISTORY_FILE.write_text(json.dumps(history, default=str, indent=2))
+    except Exception:
+        pass
+
+
+def compute_30d_change(player_name: str, current_value: float, history: dict[str, dict]) -> int:
+    """Compute 30-day value change from persistent history."""
+    today = datetime.now(UTC).date().isoformat()
+    thirty_days_ago = (datetime.now(UTC).date() - timedelta(days=30)).isoformat()
+
+    historical_val = history.get(thirty_days_ago, {}).get(player_name)
+    if historical_val is not None:
+        return int(current_value - historical_val)
+    return 0
+
+
+def update_value_history(player_values: dict[str, "PlayerValue"]) -> None:
+    """Record today's values in history."""
+    today = datetime.now(UTC).date().isoformat()
+    history = load_value_history()
+
+    if today not in history:
+        history[today] = {}
+        for pid, pv in player_values.items():
+            history[today][pv.name] = pv.adjusted_value
+
+    # Prune old entries (keep only last 60 days)
+    cutoff = (datetime.now(UTC).date() - timedelta(days=60)).isoformat()
+    history = {k: v for k, v in history.items() if k >= cutoff}
+    save_value_history(history)
 
 # valuation_engine is imported after CONFIG so AGE_CURVES is available for
 # the IntrinsicModel's age_mult callback.  The import is deferred inside
@@ -100,6 +149,35 @@ DRAFT_PICK_REGRESSION = {
 }
 
 FALLBACK_PICK_VALUES_1QB = {
+    # 2025 Round 1 (all 12 picks)
+    "2025 1.01": 9500, "2025 1.02": 8200, "2025 1.03": 7100, "2025 1.04": 6200,
+    "2025 1.05": 5400, "2025 1.06": 4700, "2025 1.07": 4100, "2025 1.08": 3600,
+    "2025 1.09": 3100, "2025 1.10": 2700, "2025 1.11": 2400, "2025 1.12": 2100,
+    # 2025 Round 2 (all 12 picks)
+    "2025 2.01": 1900, "2025 2.02": 1750, "2025 2.03": 1600, "2025 2.04": 1450,
+    "2025 2.05": 1300, "2025 2.06": 1200, "2025 2.07": 1100, "2025 2.08": 1000,
+    "2025 2.09":  900, "2025 2.10":  820, "2025 2.11":  750, "2025 2.12":  680,
+    # 2025 Round 3 (all 12 picks)
+    "2025 3.01":  600, "2025 3.02":  550, "2025 3.03":  500, "2025 3.04":  450,
+    "2025 3.05":  410, "2025 3.06":  380, "2025 3.07":  350, "2025 3.08":  320,
+    "2025 3.09":  290, "2025 3.10":  270, "2025 3.11":  250, "2025 3.12":  230,
+    # 2025 Round 4 (all 12 picks)
+    "2025 4.01":  210, "2025 4.02":  190, "2025 4.03":  175, "2025 4.04":  160,
+    "2025 4.05":  150, "2025 4.06":  140, "2025 4.07":  130, "2025 4.08":  120,
+    "2025 4.09":  110, "2025 4.10":  100, "2025 4.11":   90, "2025 4.12":   80,
+    # 2026 Round 1
+    "2026 1.01": 8200, "2026 1.02": 7100, "2026 1.03": 6200, "2026 1.04": 5400,
+    "2026 1.05": 4700, "2026 1.06": 4100, "2026 1.07": 3600, "2026 1.08": 3100,
+    "2026 1.09": 2700, "2026 1.10": 2400, "2026 1.11": 2100, "2026 1.12": 1900,
+    # 2026 Round 2
+    "2026 2.01": 1750, "2026 2.02": 1600, "2026 2.03": 1450, "2026 2.04": 1300,
+    "2026 2.05": 1200, "2026 2.06": 1100, "2026 2.07": 1000, "2026 2.08":  900,
+    "2026 2.09":  820, "2026 2.10":  750, "2026 2.11":  680, "2026 2.12":  600,
+    # 2027 Round 1
+    "2027 1.01": 7100, "2027 1.02": 6200, "2027 1.03": 5400, "2027 1.04": 4700,
+    "2027 1.05": 4100, "2027 1.06": 3600, "2027 1.07": 3100, "2027 1.08": 2700,
+    "2027 1.09": 2400, "2027 1.10": 2100, "2027 1.11": 1900, "2027 1.12": 1750,
+    # Legacy format support (Early/Mid/Late)
     "2025 Early 1st": 7200,
     "2025 Mid 1st": 5600,
     "2025 Late 1st": 4200,
@@ -786,12 +864,22 @@ class KTCClient:
         if cached:
             return self._parse(cached, is_superflex)
         urls = [
+            f"https://keeptradecut.com/api/players?format={'2' if is_superflex else '1'}",
             f"https://keeptradecut.com/dynasty-rankings/json?superFlex={sf}&format=json",
             f"https://keeptradecut.com/dynasty-rankings?format=json&superFlex={sf}",
         ]
         for u in urls:
             try:
-                data = self.http.get(u, source_name="KTC", allow_non_json=False)
+                data = self.http.get(
+                    u,
+                    source_name="KTC",
+                    allow_non_json=False,
+                    headers={
+                        "User-Agent": "Mozilla/5.0",
+                        "Accept": "application/json",
+                        "Referer": "https://keeptradecut.com/",
+                    },
+                )
                 parsed = self._parse(data, is_superflex)
                 if parsed:
                     self.cache.set(key, data)
@@ -825,8 +913,10 @@ class KTCClient:
                         return parsed
         except Exception:
             pass
-        console.print("[yellow][KTC] All scraping strategies failed. Proceeding with FantasyCalc-only values (KTC weight redistributed to FC).[/yellow]")
-        CONFIG["fc_weight"], CONFIG["ktc_weight"] = 1.0, 0.0
+        console.print(
+            "[yellow]⚠️ [KTC] Unable to fetch data (network issue, site blocked, or unavailable). "
+            "Using FantasyCalc values only for this analysis. Intrinsic model remains unaffected.[/yellow]"
+        )
         return []
 
 
@@ -901,7 +991,7 @@ class FutureValueProjector:
         weights = {1: 0.20, 2: 0.25, 3: 0.30, 5: 0.25}
         raw = sum(weights[y] * projections[y]["projected_value"] for y in [1, 2, 3, 5] if y in projections)
         p5, p95 = np.percentile(scale_vals, [5, 95]) if scale_vals else (0, 1)
-        return float(np.clip((raw - p5) / max(p95 - p5, 1) * 100, 0, 100))
+        return float(round(np.clip((raw - p5) / max(p95 - p5, 1) * 100, 0, 100), 1))
 
 
 class ValueEngine:
@@ -911,6 +1001,7 @@ class ValueEngine:
         self.ktc_data = ktc_data
         self.all_players = all_players
         self.meta = league_meta
+        self.value_history = load_value_history()
 
     def _tier(self, v: float) -> str:
         if v >= 9000:
@@ -1010,6 +1101,11 @@ class ValueEngine:
 
             am = age_multiplier(pos, p.get("age"), CONFIG["age_curve_method"])
 
+            # Compute 30-day change: prefer persistent history, fallback to FantasyCalc
+            trend_30d_val = compute_30d_change(p["full_name"], val, self.value_history)
+            if trend_30d_val == 0 and fc:
+                trend_30d_val = int(fc.get("trend_30day", 0))
+
             pv = PlayerValue(
                 id             = pid,
                 name           = p["full_name"],
@@ -1027,7 +1123,7 @@ class ValueEngine:
                 adjusted_value = val,
                 market_price   = round(market_composite, 1),
                 tier           = self._tier(val),
-                trend_30d      = int(fc.get("trend_30day", 0) if fc else 0),
+                trend_30d      = trend_30d_val,
                 trend_7d       = int(fc.get("trend_7day",  0) if fc else 0),
             )
             out[pid] = pv
@@ -1095,7 +1191,7 @@ def build_pick_values(fc_data: list[dict], league_meta: dict, traded_picks: list
     for p in picks:
         nm = p.get("pick_details") or p["name"]
         year_m = re.search(r"(20\d{2})", nm)
-        round_m = re.search(r"([123])(st|nd|rd)", nm.lower())
+        round_m = re.search(r"([1234])(st|nd|rd)?", nm.lower())
         tier = "Mid"
         if "early" in nm.lower():
             tier = "Early"
@@ -1122,10 +1218,18 @@ def build_pick_values(fc_data: list[dict], league_meta: dict, traded_picks: list
         pv = PickValue(nm, py, pr, tier, base, tdv, ev, years, 0.15 * years, tdv)
         out[nm] = pv
     if not out:
-        scale = 1.18 if league_meta["is_superflex"] else 1.0
+        scale = 1.18 if league_meta.get("is_superflex") else 1.0
         for nm, val in FALLBACK_PICK_VALUES_1QB.items():
-            year = int(re.search(r"20\d{2}", nm).group(0))
-            round_v = int(re.search(r"([123])st|([23])nd|([23])rd", nm.lower()).group(1) or 2)
+            year_search = re.search(r"20\d{2}", nm)
+            round_search = re.search(r"([1234])\.(\d{2})|([1234])(st|nd|rd)?", nm.lower())
+            if not year_search or not round_search:
+                continue
+            year = int(year_search.group(0))
+            # Extract round number, trying .NN format first (e.g., "1.06"), then ordinal (1st, etc.)
+            if round_search.group(1):  # Format like "1.06"
+                round_v = int(round_search.group(1))
+            else:  # Format like "1st", "2nd"
+                round_v = int(round_search.group(3)) if round_search.group(3) else 2
             years = max(0, year - cur_year)
             tdv = val * scale * (CONFIG["pick_year_discount_rate"] ** years)
             out[nm] = PickValue(nm, year, round_v, "Mid", val * scale, tdv, tdv * 1.05, years, 0.15 * years, tdv)
@@ -1168,14 +1272,21 @@ class RosterAnalyzer:
         r.total_value += r.pick_value
         for pos in ["QB", "RB", "WR", "TE"]:
             arr = sorted([p for p in r.players if p.position == pos], key=lambda x: x.adjusted_value, reverse=True)
-            depth_score = len(arr) / max(starter_slots[pos] * 2, 1)
+            # Depth score: how many players relative to 2x starters
+            depth_score = min(1.0, len(arr) / max(starter_slots[pos] * 2, 1))
+            # Value score: how strong are starters relative to league average
             starter_val = sum(p.adjusted_value for p in arr[: starter_slots[pos]])
+            league_avg_starter = 7000 * starter_slots[pos]  # conservative league average
+            value_score = min(1.0, starter_val / max(league_avg_starter, 1))
+            # Future score: FVS of starters
             starter_fvs = sum(p.fvs for p in arr[: starter_slots[pos]])
-            value_score = starter_val / max(8000 * starter_slots[pos], 1)
-            future_score = starter_fvs / max(70 * starter_slots[pos], 1)
-            need = max(0.0, min(1.0, 1.0 - (0.33 * depth_score + 0.34 * value_score + 0.33 * future_score)))
+            future_score = min(1.0, starter_fvs / max(60 * starter_slots[pos], 1))
+            # Need is inverse of strength across depth, value, and future
+            # Weights now sum to < 1, so perfectly stocked roster has need > 0
+            combined_strength = 0.25 * depth_score + 0.35 * value_score + 0.30 * future_score
+            need = max(0.0, min(1.0, 1.0 - combined_strength))
             r.positional_needs[pos] = round(need, 3)
-            r.positional_surplus[pos] = round(max(0.0, 0.7 - need), 3)
+            r.positional_surplus[pos] = round(max(0.0, 1.0 - need), 3)
         return r
 
 
@@ -1191,13 +1302,26 @@ class TradeEngine:
         return give, want
 
     def compute_plausibility(self, my_send: list[PlayerValue], their_receive: list[PlayerValue], opponent_roster: RosterProfile) -> float:
+        """Compute likelihood opponent accepts trade.
+        Rewards trades where value is close to even (fairness is key for acceptance).
+        """
         send_val = sum(p.adjusted_value for p in my_send)
         rec_val = sum(p.adjusted_value for p in their_receive)
         value_ratio = rec_val / max(send_val, 1)
-        if value_ratio < 0.75:
+
+        # Hard cap: don't recommend trades where I win by more than 20%
+        if value_ratio > 1.20 or value_ratio < 0.70:
             return 0.0
+
+        # Fairness score: highest when trade is near-even (90-110% range)
+        fairness = 1.0 - abs(value_ratio - 1.0) * 5  # Peaks at ratio == 1.0
+        fairness = max(0.0, fairness)
+
+        # Opponent benefit score: do they get players in positions they need?
         need_fulfillment = float(np.mean([opponent_roster.positional_needs.get(p.position, 0.5) for p in their_receive])) if their_receive else 0.5
-        return round(min(1.0, 0.60 * min(value_ratio, 1.15) + 0.40 * need_fulfillment), 3)
+
+        # Plausibility = weighted fairness + need fulfillment
+        return round(0.65 * fairness + 0.35 * need_fulfillment, 3)
 
     def generate_recommendations(self) -> list[TradeScore]:
         recs: list[TradeScore] = []
@@ -1220,22 +1344,24 @@ class TradeEngine:
                             continue
                         rec_val = sum(x.adjusted_value for x in receive)
                         ratio = rec_val / max(send_val, 1)
-                        if not (0.65 <= ratio <= 1.50):
-                            continue
-                        upper_bound = sum(sorted([x.adjusted_value for x in opp_pool], reverse=True)[:b]) - send_val
-                        if upper_bound < self.args.min_gain:
+                        # Fairness filter: only show trades within ±15% value
+                        if not (0.85 <= ratio <= 1.15):
                             continue
                         raw_gain = rec_val - send_val
-                        if raw_gain < self.args.min_gain:
+                        # Even trades may have small gains; don't require huge min_gain
+                        # Adjust minimum based on fairness: fair trades can have lower gain
+                        fair_trade_threshold = max(50, self.args.min_gain // 2) if 0.95 <= ratio <= 1.05 else self.args.min_gain
+                        if raw_gain < fair_trade_threshold:
                             continue
                         need_gain = sum(x.adjusted_value * (1 + 0.20 * (self.my.positional_needs.get(x.position, 0.5) - 0.5)) for x in receive) - send_val
                         fvs_delta = sum(x.fvs for x in receive) - sum(x.fvs for x in send)
                         plaus = self.compute_plausibility(list(send), list(receive), opp)
-                        if plaus <= 0:
+                        if plaus <= 0.1:  # Very low plausibility means opponent won't accept
                             continue
                         n_raw = np.tanh(raw_gain / 3000)
                         n_fvs = np.tanh(fvs_delta / 120)
-                        comp = 0.45 * n_raw + 0.30 * n_fvs + 0.25 * plaus
+                        # Reweight: plausibility is most important now (fair trades)
+                        comp = 0.30 * n_raw + 0.25 * n_fvs + 0.45 * plaus
                         recs.append(TradeScore(opp.owner_name, list(send), list(receive), raw_gain, need_gain, fvs_delta, plaus, comp))
         recs.sort(key=lambda x: x.composite_score, reverse=True)
         seen = set()
@@ -1549,6 +1675,8 @@ def main() -> int:
             ktc_data = []
     ve = ValueEngine(resolver, fc_data, ktc_data, all_players, meta)
     player_values = ve.build_consensus()
+    # Record today's values for 30-day change tracking
+    update_value_history(player_values)
     pick_values = build_pick_values(fc_data, meta, traded_picks, draft_picks)
     projector = FutureValueProjector(args.age_method, proj_years)
     scale_vals = [p.adjusted_value for p in player_values.values()] or [1]
