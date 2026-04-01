@@ -95,7 +95,7 @@ with st.sidebar:
     )
 
     st.divider()
-    analyze_btn = st.button("🔍 Analyze My Team", type="primary", use_container_width=True)
+    analyze_btn = st.button("🔍 Analyze My Team", type="primary", width="stretch")
 
 # ── session state init ────────────────────────────────────────────────────────
 for key in ("leagues", "data", "state", "user_id"):
@@ -373,6 +373,15 @@ ppr_label = {1.0: "Full PPR", 0.5: "Half PPR", 0.0: "Standard"}.get(meta.get("pp
 league_flags.append(ppr_label)
 st.caption(f"Data: {src_icons}  |  Format: {' · '.join(league_flags)}")
 
+# Show warning if KTC is unavailable
+if not source_status.get("ktc"):
+    st.warning(
+        "⚠️ **KTC data unavailable** (network issue, rate-limited, or site blocked).  "
+        "Market prices are using **FantasyCalc only**. Intrinsic model unaffected.  "
+        "Try again in 24h or check your internet connection.",
+        icon="⚠️",
+    )
+
 st.divider()
 
 # ── tabs ──────────────────────────────────────────────────────────────────────
@@ -474,7 +483,7 @@ with tab_roster:
         .map(_color_trend, subset=["30d"])
         .map(_color_signal, subset=["Signal"])
     )
-    st.dataframe(styled_roster, use_container_width=True, hide_index=True)
+    st.dataframe(styled_roster, width="stretch", hide_index=True)
 
     if my.picks:
         st.subheader("Draft Picks")
@@ -489,7 +498,7 @@ with tab_roster:
             }
             for p in sorted(my.picks, key=lambda x: x.adjusted_value, reverse=True)
         ]
-        st.dataframe(pd.DataFrame(pick_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(pick_rows), width="stretch", hide_index=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB: LEAGUE RANKINGS
@@ -537,7 +546,7 @@ with tab_league:
         .apply(_highlight_me, axis=1)
         .map(_color_grade, subset=["Grade"])
     )
-    st.dataframe(styled_league, use_container_width=True, hide_index=True)
+    st.dataframe(styled_league, width="stretch", hide_index=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB: TRADE RECOMMENDATIONS
@@ -629,7 +638,7 @@ with tab_buysell:
                 }
                 for b in buy
             ]
-            st.dataframe(pd.DataFrame(buy_rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(buy_rows), width="stretch", hide_index=True)
         else:
             st.info(
                 "No buy candidates found at current threshold (≥ +8 % spread).  "
@@ -651,7 +660,7 @@ with tab_buysell:
                 }
                 for s in sell
             ]
-            st.dataframe(pd.DataFrame(sell_rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(sell_rows), width="stretch", hide_index=True)
         else:
             st.info("No sell candidates on your roster at current threshold.", icon="💡")
 
@@ -678,7 +687,7 @@ with tab_movers:
             }
             for p in risers
         ]
-        st.dataframe(pd.DataFrame(riser_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(riser_rows), width="stretch", hide_index=True)
 
     with dn_col:
         st.subheader("🔴 Biggest Fallers (30d)")
@@ -693,7 +702,7 @@ with tab_movers:
             }
             for p in fallers
         ]
-        st.dataframe(pd.DataFrame(faller_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(faller_rows), width="stretch", hide_index=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB: FUTURE PROJECTIONS
@@ -742,7 +751,7 @@ with tab_future:
         .map(_color_fvs_tier, subset=["FVS Tier"])
         .map(_color_arrow, subset=["Trend"])
     )
-    st.dataframe(styled_proj, use_container_width=True, hide_index=True)
+    st.dataframe(styled_proj, width="stretch", hide_index=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB: POSITIONAL NEEDS HEATMAP
@@ -783,4 +792,4 @@ with tab_needs:
         .map(_color_need, subset=["QB", "RB", "WR", "TE"])
         .format({"QB": "{:.2f}", "RB": "{:.2f}", "WR": "{:.2f}", "TE": "{:.2f}"})
     )
-    st.dataframe(styled_needs, use_container_width=True, hide_index=True)
+    st.dataframe(styled_needs, width="stretch", hide_index=True)
