@@ -1,289 +1,169 @@
 # FFPredict
 
-A comprehensive dynasty fantasy football analyzer powered by live KTC (KeepTradeCut) and FantasyCalc data, with intelligent trade evaluation, roster grading, and future value projections.
-
-## What It Does
-
-FFPredict is a tool for serious dynasty fantasy football players who want to make data-driven trade decisions. It fetches live player valuations from two sources—**KTC** (community dynasty trade values) and **FantasyCalc** (real-world performance signals)—blends them intelligently, and provides:
-
-- **Trade Analyzer**: Evaluate proposed trades with clear value gains/losses
-- **Roster Grading**: See how your team stacks up against others in the league
-- **Power Rankings**: Visualize league standings by roster strength
-- **Buy/Sell Targets**: Identify undervalued (buy) and overvalued (sell) players
-- **Draft Pick Valuation**: Assess trade value of future draft capital
-- **Future Value Score (FVS)**: Project player value over 1, 2, 3, and 5-year horizons
-
-## How Player Values Work
-
-FFPredict uses a two-source blending system tailored to dynasty fantasy football:
-
-### Value Sources
-
-| Source | Role | Weight |
-|--------|------|--------|
-| **KTC (KeepTradeCut)** | Primary dynasty trade value—what the community says players are worth in trades | **65%** |
-| **FantasyCalc** | Real-world performance signal—recent production and trend momentum | **35%** |
-
-### Directional Disagreement Handling
-
-When the two sources disagree by more than 35%, FFPredict applies logic based on *which way* they disagree:
-
-- **When FantasyCalc > KTC** (by >35%): Player is performing better than the dynasty community values them. This is a **buy signal**—the player gets a small boost (+4%) to reflect undervaluation.
-  - *Example*: A WR posting elite production numbers (FC: 8500) but the community hasn't caught up (KTC: 5200).
-
-- **When KTC > FantasyCalc** (by >35%): The dynasty community is overvaluing this player relative to real-world results. This is a **sell signal**—the value gets a penalty (-8%) to temper hype.
-  - *Example*: A high-pedigree player with low recent production (KTC: 6000, FC: 3800).
-
-When sources agree (disagree ≤35%), consensus is a straight weighted blend: **0.65 × KTC + 0.35 × FC**.
-
-### Additional Value Adjustments
-
-On top of the KTC/FC blend, FFPredict applies:
-
-1. **Age Curves** (Gompertz model by default)
-   - Each position has a peak age and decay profile
-   - QB peaks at 28, RB at 24, WR at 26, TE at 27
-   - Captures the upside of youth and the decline with age
-
-2. **Positional Scarcity Premiums**
-   - Elite players at each position get a boost (harder to replace)
-   - QB top 5 +8%, RB top 10 +5%, WR top 12 +2%, TE top 5 +12%
-
-3. **TE Premium**: Tight ends get a baseline 6% boost, plus up to +3.75% based on league settings
-
-4. **Superflex QB Premium**: QBs get +14% value in superflex leagues
-
-5. **Rookie Contract Bonus**: Players with ≤3 years of experience get +5%
-
-6. **Veteran Penalty**: Players 3+ years past their position peak see declining value (floors at 45% of adjusted value)
-
-7. **Injury Adjustment**: IR/O = 88%, Q = 97%, D = 91% of base value
-
-### Normalization
-
-Both KTC and FantasyCalc values are normalized to a common 10,000-point scale using each source's 90th percentile value. This ensures fair comparison even though the raw value ranges may differ.
-
-## Key Features
-
-### Trade Analyzer
-Input two rosters (you and a trading partner) and get an instant breakdown:
-- Projected value of assets each side is sending
-- Value gain/loss for each side
-- Risk assessment based on age, injury, and trend volatility
-- Depth impact (how it affects your team depth at each position)
-
-### Roster Grading
-Submit your league's rosters (via Sleeper username) and get:
-- Individual roster grades (A-F) by tier strength
-- Power ranking across all teams
-- Bench depth analysis
-- Positional balance scorecard
-
-### Buy/Sell Targets
-FFPredict surfaces:
-- **Undervalued** players (FC signal strongly bullish vs. KTC)
-- **Overvalued** players (KTC hype vs. weak FC signal)
-- **Declining** players (negative 30-day trend momentum)
-- **Rising** players (positive 30-day trend momentum)
-
-### Future Value Score (FVS)
-A composite 0–100 score blending projected values across multiple years:
-- **1-year**: 20% weight (current contention window)
-- **2-year**: 25% weight
-- **3-year**: 30% weight
-- **5-year**: 25% weight (long-term dynasty asset quality)
-
-Higher FVS = better long-term hold. Great for identifying dynasty studs vs. one-year wonders.
-
-## Setup & Installation
-
-### Requirements
-- Python 3.11+
-- pip package manager
-
-### Steps
-
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/garrettjmoore57/FFPredict.git
-   cd FFPredict
-   ```
-
-2. **Install dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. **Set up configuration (optional)**
-   - If using the Sleeper roster pull, provide your Sleeper username:
-     ```bash
-     export SLEEPER_USERNAME="your_username"
-     ```
-   - Or pass it when prompted by the app
-
-## Running the App
-
-### Web UI (Streamlit)
-```bash
-streamlit run app.py
-```
-Then open your browser to `http://localhost:8501`. Use the sidebar to:
-- Select league and league type (1QB, Superflex, etc.)
-- Choose number of teams and scoring format (PPR, Half-PPR, Standard)
-- Upload league data or pull from Sleeper
-- Switch between Trade Analyzer, Power Rankings, and Buy/Sell targets
-
-### CLI
-```bash
-python fantasy_trade_analyzer.py
-```
-Launches an interactive CLI prompt where you can:
-- Query individual player values
-- Evaluate trades
-- Print roster summaries
-- Export data to JSON
-
-## Configuration
-
-FFPredict uses sensible defaults, but you can tweak behavior by editing the `CONFIG` dict in `fantasy_trade_analyzer.py`:
-
-```python
-CONFIG = {
-    "fc_weight": 0.35,              # FantasyCalc weight in consensus (default 35%)
-    "ktc_weight": 0.65,             # KTC weight in consensus (default 65%)
-    "age_curve_method": "gompertz", # age curve shape (gompertz, exponential, logistic)
-    "superflex_qb_premium": 1.14,   # QB value boost in superflex (default 1.14x)
-    "te_premium_base": 1.06,        # TE baseline premium (default 1.06x)
-    "positional_scarcity_enabled": True,  # apply elite tier boosts
-    "rookie_contract_bonus": 0.05,  # rookie contract value boost (default 5%)
-    "veteran_contract_penalty": 0.03, # per-year value decay for vets past peak
-    "pick_year_discount_rate": 0.88, # discount future draft picks by year
-}
-```
-
-## Data Sources
-
-### KeepTradeCut (KTC)
-- **URL**: `https://keeptradecut.com/dynasty-rankings`
-- **What**: Community-driven 1v1 trade value database
-- **How it's fetched**: JSON API + HTML scrape fallback (with browser User-Agent)
-- **Cached**: 24 hours (disk cache at `.fantasy_cache/`)
-- **Includes**: Superflex-adjusted values, 7-day trend data
-
-### FantasyCalc
-- **URL**: `https://api.fantasycalc.com/values/current`
-- **What**: Crowdsourced dynasty values based on real league trades + player production
-- **How it's fetched**: JSON API
-- **Cached**: 24 hours
-- **Includes**: 1-day, 7-day, 30-day trend momentum, age, team, draft picks
-
-### Caching
-Both data sources are cached locally in `.fantasy_cache/` to avoid repeated network calls. Cache TTL is configurable in `CONFIG["cache_ttl_hours"]` (default 24). Delete `.fantasy_cache/` to force a fresh pull.
-
-## Tier System
-
-FFPredict assigns each player a tier based on adjusted value:
-
-| Tier | Value Range | Role |
-|------|-------------|------|
-| **Elite** | ≥9000 | Perennial starter, generational talent |
-| **Star** | 7000–8999 | Reliably excellent, contender-level |
-| **Starter** | 4500–6999 | Core starter, depth on most teams |
-| **Flex** | 2500–4499 | Flex-worthy or team's WR3/RB3 |
-| **Depth** | 1000–2499 | Depth piece, lottery ticket |
-| **Stash** | <1000 | Upside play, rarely starts |
-
-## Future Value Score (FVS)
-
-FFPredict uses age curves and Monte Carlo simulation to project each player's value across 1, 2, 3, and 5-year horizons. The FVS combines these into a single 0–100 score:
-
-```
-FVS = 0.20 × (1yr value percentile) 
-    + 0.25 × (2yr value percentile)
-    + 0.30 × (3yr value percentile)
-    + 0.25 × (5yr value percentile)
-```
-
-**Use cases:**
-- **High FVS (75+)**: Dynasty studs; long-term holds
-- **Medium FVS (50–74)**: Mixed window; good value near contention window
-- **Low FVS (<50)**: Short-term asset; sell if you're rebuilding
-
-## Trade Analyzer Details
-
-When you input a proposed trade, FFPredict:
-
-1. **Sums asset values** for each side (players + picks)
-2. **Calculates value delta** (what's being given up vs. received)
-3. **Flags massive disagreements** between KTC and FC for either side (uncertainty)
-4. **Assesses positional impact** (does the trade leave you thin at a position?)
-5. **Considers future outlook** (is the incoming player entering decline while outgoing asset is rising?)
-
-The verdict is color-coded:
-- 🟢 **Green** (gain ≥250 value): Trade favors you
-- 🟡 **Yellow** (gain/loss ±249): Fairly even
-- 🔴 **Red** (loss ≥250 value): Trade favors your opponent
-
-## Example Scenarios
-
-### Scenario 1: Undervalued Performer
-```
-Player: Austin Ekeler
-KTC Value: 3,200
-FantasyCalc Value: 5,100 (59% higher!)
-Status: Disagreement > 35% → +4% boost applied
-Result: Adjusted value rises to ~3,400
-Signal: BUY — real production exceeds dynasty valuation
-```
-
-### Scenario 2: Overhyped Name
-```
-Player: A 29-year-old WR entering decline
-KTC Value: 5,800 (community still backing the name)
-FantasyCalc Value: 3,100 (recent performance down)
-Status: Disagreement > 35% → -8% penalty applied
-Result: Adjusted value drops to ~5,200
-Signal: SELL — name value exceeding real production
-```
-
-### Scenario 3: Consensus Agreement
-```
-Player: Justin Jefferson (WR, age 25, elite production)
-KTC Value: 8,900
-FantasyCalc Value: 9,200 (only 3% higher)
-Status: Disagreement ≤ 35% → standard 65/35 blend
-Result: Adjusted value = 0.65 × 8,900 + 0.35 × 9,200 = 9,015
-Signal: HOLD — sources agree, elite tier
-```
-
-## Troubleshooting
-
-### "KTC scrape failed, falling back to FantasyCalc only"
-This means the KTC scraping strategy failed (site structure change, network issue, or IP blocking). FFPredict automatically degrades to 100% FantasyCalc weighting. Fix: Wait 24+ hours (cache expires), or check if keeptradecut.com is accessible.
-
-### Missing players in the valuation table
-FFPredict only shows players that have KTC *or* FantasyCalc data. If a player isn't listed:
-- They may be too new (rookie not yet valued by both sources)
-- They may be inactive/retired
-- Name matching failed (rare, but can happen with unique names or slight misspellings)
-
-### Values seem off
-- Verify league type (1QB vs. Superflex) is set correctly
-- Check that scoring format (PPR, Half-PPR, Standard) matches your league
-- Confirm no IDP (individual defensive player) leagues are being analyzed (FFPredict supports skill positions only)
-
-## Contributing
-
-Found a bug or have an idea? Open an issue on GitHub or submit a pull request!
-
-## License
-
-MIT License — see LICENSE file.
-
-## Disclaimer
-
-FFPredict provides data-driven insights but is not investment advice. Dynasty trades involve subjective factors (team needs, rebuild timeline, risk tolerance) that algorithms can't capture. Always do your own diligence and consider your league's context.
+A model-vs-market decision engine for dynasty fantasy football.
 
 ---
 
-**Built with ❤️ for dynasty fantasy football nerds.**
+## What the app does
+
+FFPredict estimates the **intrinsic dynasty value** of every player in your league, compares it to what the market currently prices them at, and surfaces where the two diverge.
+
+When your model says a player is worth 7 200 and the market prices them at 5 500, that 1 700-point spread is your edge — a potential buy.  When the market prices someone at 6 800 and the model says 4 900, that is a sell signal.
+
+The goal is not to average two popular sources.  It is to tell you when the market is wrong.
+
+---
+
+## Why it is different
+
+Most dynasty tools blend KTC and FantasyCalc into a single number and call it a value.  That produces a weighted average of community opinion — not an independent estimate of intrinsic worth.
+
+FFPredict treats market data as one input layer and builds a separate intrinsic model:
+
+| Layer | What it is |
+|---|---|
+| **Market Price** | KTC + FantasyCalc composite — what players actually trade for |
+| **Intrinsic Value** | Forward-looking present-value model — what the player is likely worth |
+| **Spread** | Intrinsic − Market — your actionable signal |
+
+KTC and FantasyCalc are described correctly:
+- **KTC** = community sentiment.  What dynasty managers *say* a player is worth.
+- **FantasyCalc** = executed market price.  What managers actually *pay* in real trades.
+
+Neither is used to imply player performance.  Neither is the model itself.
+
+---
+
+## Core model layers
+
+### 1 · Market price composite
+
+```
+market_price = 0.50 × KTC_normalised + 0.50 × FantasyCalc_normalised
+```
+
+Both sources are normalised to a common 10 000-point scale using their 90th percentile as a reference.  The 50/50 split is configurable.  KTC vs FC disagreement is surfaced as a context signal (`sentiment_gap`) but does **not** directly inflate or deflate the score — the old ±4 %/−8 % bonuses are gone.
+
+### 2 · Intrinsic value model
+
+A 3-year present-value formula:
+
+```
+V = Σ  age_mult(age + t) × PEAK_VALUE × survival(pos, age, t) × role(rank, t)
+        ────────────────────────────────────────────────────────────────────────
+                              (1 + 12 %)^t
+```
+
+| Component | What it captures |
+|---|---|
+| `age_mult` | Gompertz career arc by position (QB peaks 28, RB 24, WR 26, TE 27) |
+| `PEAK_VALUE` | Position-specific intrinsic anchor (calibrated to ~10 000-point scale) |
+| `survival` | P(player still active at year t), adjusted for age relative to peak |
+| `role` | P(still a starter at year t), based on current position rank |
+| `discount rate` | 12 % annual time discount — future production is worth less today |
+
+Raw PV values are portfolio-calibrated so intrinsic and market prices live on the same scale and spreads are directly comparable.
+
+### 3 · Uncertainty
+
+Each player's intrinsic value comes with a confidence band from Monte Carlo simulation (150 runs per player).  Uncertainty grows with projection horizon.  Outputs:
+
+- p10 / p50 / p90 intrinsic value
+- Uncertainty label: low / moderate / high
+- Bust probability and elite-outcome probability
+
+### 4 · Scarcity
+
+Replacement-level value-over-replacement, computed from your actual league settings (roster size, starting slots, superflex).  Replaces static tier boosts like "top-5 QB +8 %."  Players below replacement level receive no premium; players above it receive a continuously scaled premium.
+
+### 5 · Picks and rookies
+
+Draft picks use historical hit/bust rates by pick tier.  Younger players naturally have wider confidence bands.  No flat rookie contract bonus is applied to current market price.
+
+---
+
+## Output interpretation
+
+| Column | Meaning |
+|---|---|
+| **Market** | Adjusted composite of KTC + FC, including league-format multipliers |
+| **Intrinsic** | 3-year PV model estimate (portfolio-calibrated) |
+| **Spread %** | (Intrinsic − Market) / Market × 100 |
+| **Signal** | 🔵 Buy (spread ≥ +8 %) · 🔴 Sell (spread ≤ −8 %) · — Hold |
+| **FVS** | 0–100 league-relative future value score (trajectory signal) |
+
+### Reading the spread
+
+- **+10 %**: Model estimates the player is worth ~10 % more than the market. Buy candidate — especially when the market price is trending down.
+- **−12 %**: Market is pricing the player ~12 % above the model estimate. Sell candidate — especially when the market price is near its peak.
+- **Near 0 %**: Model and market agree. Hold unless other factors apply.
+
+Uncertainty matters.  A +10 % spread with "high uncertainty" is less actionable than +10 % with "low uncertainty."
+
+---
+
+## Example workflow
+
+1. Run the app with your Sleeper username.
+2. Open the **My Roster** tab.  Sort by **Spread %**.
+3. Large positive spread = model thinks the player is underpriced.  Consider buying more at market price.
+4. Large negative spread = market overpricing.  Consider selling while market is high.
+5. Open **Buy / Sell** for league-wide opportunities: buy candidates are on opponents' rosters; sell candidates are on yours.
+6. Use **Trade Recommendations** to find specific trade proposals where you move overvalued assets and receive undervalued ones.
+
+---
+
+## Developer notes
+
+### Setup
+
+```bash
+git clone https://github.com/garrettjmoore57/FFPredict.git
+cd FFPredict
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+### Key files
+
+| File | Purpose |
+|---|---|
+| `valuation_engine.py` | Layered valuation model: market composite, intrinsic PV, scarcity |
+| `fantasy_trade_analyzer.py` | Data fetching (Sleeper, KTC, FC), value computation, trade engine |
+| `app.py` | Streamlit UI |
+
+### Configuration
+
+Central constants live at the top of each file:
+
+- `valuation_engine.py`: `INTRINSIC_DISCOUNT_RATE`, `MARKET_KTC_WEIGHT`, spread thresholds, scarcity premiums
+- `fantasy_trade_analyzer.py` → `CONFIG`: league format multipliers, cache TTL, trade engine settings
+
+### Data sources
+
+| Source | What it is | Cache |
+|---|---|---|
+| **Sleeper** | Roster, league settings, player metadata | 24 h |
+| **KTC** | Community dynasty trade values | 24 h |
+| **FantasyCalc** | Trade-derived executed prices, 30-day trends | 24 h |
+
+If KTC is unavailable, the market composite falls back to FantasyCalc only.  The UI flags this.
+
+### Extending the model
+
+- **Better survival probabilities**: Replace `_SURVIVAL_BASE` in `valuation_engine.py` with empirical career-length data.
+- **League-specific discount rate**: Pass a custom `discount` argument to `IntrinsicModel`.
+- **Roster simulation**: `RosterAnalyzer` profiles are ready for Monte Carlo team-level simulation; add a `SimulationEngine` class that aggregates player-level distributions into roster outcome distributions.
+- **Target share / snap %**: Layer real production data into the intrinsic model by extending the `IntrinsicResult` inputs.
+
+### Known limitations
+
+- KTC and FantasyCalc don't provide raw contract or salary data; the model can't explicitly factor in rookie salary scale.
+- Survival probabilities are position-wide, not player-specific.  Injury history is not tracked across seasons.
+- The 3-year horizon is deliberately conservative.  5-year projections would require wider uncertainty bands and more speculative survival assumptions.
+
+---
+
+## Disclaimer
+
+FFPredict provides data-driven insights for dynasty decision support.  It is not investment advice.  Dynasty trades involve subjective factors (team context, league dynamics, personal risk tolerance) that any model only partially captures.

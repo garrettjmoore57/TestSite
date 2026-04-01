@@ -217,9 +217,11 @@ def do_analysis(
 
 
 # ── main header ───────────────────────────────────────────────────────────────
-st.title("Dynasty Future Value Analyzer")
+st.title("FFPredict — Dynasty Decision Engine")
 st.caption(
-    f"Powered by Sleeper · FantasyCalc · KTC  |  {datetime.now().strftime('%B %d, %Y')}"
+    f"Market data: KTC (sentiment) · FantasyCalc (executed)  |  "
+    f"Intrinsic model: 3-yr PV · survival · replacement level  |  "
+    f"{datetime.now().strftime('%B %d, %Y')}"
 )
 
 # ── step 1: fetch leagues when "Analyze" clicked ──────────────────────────────
@@ -293,16 +295,46 @@ if not st.session_state.data:
     with st.expander("What does this app do?"):
         st.markdown(
             """
-            **FFPredict** pulls live dynasty values from **FantasyCalc** and **KeepTradeCut**,
-            blends them with age-curve projections, and gives you:
+            **FFPredict** is a model-vs-market decision engine for dynasty fantasy football.
 
-            - 📋 **Roster breakdown** — current & projected player values, tiers, trends
-            - 🏆 **League power rankings** — where you stand vs every other team
-            - 🔄 **Trade recommendations** — value-positive moves ranked by composite score
-            - 📈 **Buy low / Sell high targets** — players to chase or move before value shifts
-            - 📉 **Value movers** — biggest 30-day risers and fallers across the whole market
-            - 🔮 **Future value projections** — 1, 2, 3, and 5-year outlooks per player
-            - 🗺️ **Positional needs heatmap** — color-coded roster gaps for every team
+            It separates two things most tools blend together:
+
+            | Layer | What it is |
+            |---|---|
+            | **Market Price** | What KTC + FantasyCalc say a player trades for right now |
+            | **Intrinsic Value** | What a 3-year present-value model says the player is actually worth |
+
+            **The spread between them** — intrinsic minus market — is your edge signal:
+            - 📈 **Positive spread** → model thinks the market is underpricing the player (buy candidate)
+            - 📉 **Negative spread** → model thinks the market is overpricing the player (sell candidate)
+
+            #### Data sources
+            - **KTC (KeepTradeCut)** — community sentiment: what people *say* players are worth
+            - **FantasyCalc** — executed prices: what people actually *pay* in completed trades
+
+            Neither source is treated as ground truth. Both feed the market layer only.
+            KTC vs FC disagreement is surfaced as a context signal, not used to boost or penalise scores.
+
+            #### Intrinsic model
+            Uses a 3-year present-value formula:
+            ```
+            V = Σ  age_mult(age+t) × survival(pos, age, t) × role_persistence(rank, t)
+                    ─────────────────────────────────────────────────────────────────
+                                        (1 + 12 %)^t
+            ```
+            - Age curves follow Gompertz career-arc fitting by position
+            - Survival probability accounts for position and age relative to peak
+            - Role persistence reflects current rank in position
+            - Uncertainty bands come from Monte Carlo simulation
+
+            #### Outputs
+            - 📋 Roster breakdown with Market Price / Intrinsic Value / Spread per player
+            - 🏆 League power rankings
+            - 🔄 Trade recommendations ranked by composite score
+            - 📈 Buy / Sell targets based on model-vs-market spread
+            - 📉 30-day value movers
+            - 🔮 1, 2, 3, 5-year forward projections
+            - 🗺️ Positional needs heatmap
             """
         )
     st.stop()
@@ -375,7 +407,21 @@ with tab_roster:
     r4.metric("TE Value", f"{my.te_value:,.0f}")
     r5.metric("Pick Value", f"{my.pick_value:,.0f}")
 
+    st.caption(
+        "**Market Price** = KTC + FantasyCalc composite (what the player actually trades for).  "
+        "**Intrinsic** = 3-yr present-value model estimate.  "
+        "**Spread** = Intrinsic − Market (positive = model thinks undervalued)."
+    )
+
     players_sorted = sorted(my.players, key=lambda x: x.adjusted_value, reverse=True)
+
+    def _signal(p) -> str:
+        if p.buy_signal:
+            return "🔵 Buy"
+        if p.sell_signal:
+            return "🔴 Sell"
+        return "— Hold"
+
     roster_rows = [
         {
             "#": i,
@@ -383,13 +429,15 @@ with tab_roster:
             "Pos": p.position,
             "Team": p.team,
             "Age": round(p.age, 1) if p.age else None,
-            "Value": int(p.adjusted_value),
+            "Market": int(p.adjusted_value),
+            "Intrinsic": int(p.intrinsic_value) if p.intrinsic_value else "—",
+            "Spread %": f"{p.spread_pct:+.1f}%" if p.spread_pct else "—",
+            "Signal": _signal(p),
             "+1yr": int(p.future_value_1yr),
             "+3yr": int(p.future_value_3yr),
-            "+5yr": int(p.future_value_5yr),
             "FVS": round(p.fvs, 1),
             "Tier": p.tier,
-            "30d Trend": p.trend_30d,
+            "30d": p.trend_30d,
         }
         for i, p in enumerate(players_sorted, 1)
     ]
@@ -413,10 +461,18 @@ with tab_roster:
             return "color:#ef4444; font-weight:bold"
         return ""
 
+    def _color_signal(val: str) -> str:
+        if "Buy" in str(val):
+            return "color:#60a5fa; font-weight:bold"
+        if "Sell" in str(val):
+            return "color:#f87171; font-weight:bold"
+        return "color:#6b7280"
+
     styled_roster = (
         df_roster.style
         .map(_color_tier, subset=["Tier"])
-        .map(_color_trend, subset=["30d Trend"])
+        .map(_color_trend, subset=["30d"])
+        .map(_color_signal, subset=["Signal"])
     )
     st.dataframe(styled_roster, use_container_width=True, hide_index=True)
 
@@ -529,11 +585,20 @@ with tab_trades:
                     st.metric("FVS Delta", f"{r.future_value_delta:+.1f}")
                     st.metric("Need-Adj Gain", f"+{r.need_adjusted_gain:,.0f}")
 
-                why = (
-                    "Sell aging asset for stronger long-term trajectory."
-                    if r.future_value_delta > 0
-                    else "Win current value while preserving depth."
-                )
+                # Build a model-aware reason string
+                send_sell_signals  = [p for p in r.send_assets    if p.sell_signal]
+                recv_buy_signals   = [p for p in r.receive_assets  if p.buy_signal]
+                if send_sell_signals and recv_buy_signals:
+                    why = (
+                        f"Sell model-overvalued asset(s) "
+                        f"({', '.join(p.name for p in send_sell_signals)}) "
+                        f"for model-undervalued asset(s) "
+                        f"({', '.join(p.name for p in recv_buy_signals)})."
+                    )
+                elif r.future_value_delta > 0:
+                    why = "Exchange for stronger long-term trajectory (higher FVS received)."
+                else:
+                    why = "Win current market value while preserving roster depth."
                 st.caption(f"Why: {why}")
                 st.markdown("</div>", unsafe_allow_html=True)
                 st.write("")
@@ -542,42 +607,53 @@ with tab_trades:
 # TAB: BUY / SELL
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_buysell:
+    st.caption(
+        "Signals are driven by **model-vs-market spread**, not KTC-vs-FC disagreement.  "
+        "**Buy** = intrinsic value > market price by ≥ 8 % AND market trending down (entry point).  "
+        "**Sell** = market price > intrinsic value by ≥ 8 % AND market trending up (exit point)."
+    )
     buy_col, sell_col = st.columns(2)
 
     with buy_col:
-        st.subheader("📈 Buy Low Targets")
-        st.caption("Players across the league whose value is likely to rise")
+        st.subheader("🔵 Buy Candidates")
+        st.caption("Model thinks market is underpricing these players")
         if buy:
             buy_rows = [
                 {
-                    "Name": b["name"],
-                    "Owner": b.get("owner", "—"),
-                    "Score": round(b["score"], 3),
-                    "Current": int(b["current"]),
-                    "2yr Proj": int(b["future"]),
+                    "Name":       b["name"],
+                    "Owner":      b.get("owner", "—"),
+                    "Spread %":   f"+{b['spread_pct']:.1f}%",
+                    "Market":     int(b["current"]),
+                    "Intrinsic":  int(b["intrinsic"]),
+                    "Confidence": b.get("uncertainty", "—"),
                 }
                 for b in buy
             ]
             st.dataframe(pd.DataFrame(buy_rows), use_container_width=True, hide_index=True)
         else:
-            st.info("No buy low targets identified.")
+            st.info(
+                "No buy candidates found at current threshold (≥ +8 % spread).  "
+                "Try lower **Min Value Gain** or check back when market prices shift.",
+                icon="💡",
+            )
 
     with sell_col:
-        st.subheader("📉 Sell High Targets")
-        st.caption("Your players who may be near peak value — move before decline")
+        st.subheader("🔴 Sell Candidates")
+        st.caption("Model thinks the market is overpricing these players on your roster")
         if sell:
             sell_rows = [
                 {
-                    "Name": s["name"],
-                    "Score": round(s["score"], 3),
-                    "Current": int(s["current"]),
-                    "1yr Proj": int(s["future"]),
+                    "Name":       s["name"],
+                    "Spread %":   f"{s['spread_pct']:.1f}%",
+                    "Market":     int(s["current"]),
+                    "Intrinsic":  int(s["intrinsic"]),
+                    "Confidence": s.get("uncertainty", "—"),
                 }
                 for s in sell
             ]
             st.dataframe(pd.DataFrame(sell_rows), use_container_width=True, hide_index=True)
         else:
-            st.info("No sell high targets identified.")
+            st.info("No sell candidates on your roster at current threshold.", icon="💡")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB: VALUE MOVERS
@@ -625,7 +701,9 @@ with tab_movers:
 with tab_future:
     st.subheader("Future Value Projections — Top 25 by FVS")
     st.caption(
-        "FVS (Future Value Score) is a 0–100 composite of projected dynasty value across 1, 2, 3, and 5 years."
+        "**FVS** (Future Value Score) is a 0–100 league-relative score based on projected market-price trajectory "
+        "over 1, 2, 3, and 5 years.  Higher = better long-term hold.  "
+        "Use **Spread %** in the Roster tab for the model-vs-market signal."
     )
 
     top_players = sorted(my.players, key=lambda x: x.fvs, reverse=True)[:25]

@@ -37,6 +37,16 @@ from rich.traceback import install
 install(show_locals=False)
 console = Console()
 
+# valuation_engine is imported after CONFIG so AGE_CURVES is available for
+# the IntrinsicModel's age_mult callback.  The import is deferred inside
+# build_consensus() to avoid a module-level circular reference.
+from valuation_engine import (  # noqa: E402
+    LeagueSettings,
+    build_valuation_results,
+    BUY_SPREAD_THRESHOLD_PCT,
+    SELL_SPREAD_THRESHOLD_PCT,
+)
+
 CONFIG: dict[str, Any] = {
     "sleeper_username": "",
     "season": "2025",
@@ -45,20 +55,24 @@ CONFIG: dict[str, Any] = {
     "min_trade_value_gain": 250,
     "max_players_to_send": 3,
     "top_n_trades": 25,
-    "fc_weight": 0.35,
-    "ktc_weight": 0.65,
+    # Market composite weights — KTC is sentiment, FC is executed price.
+    # Kept configurable; default is 50/50 (no bias toward either source).
+    "market_ktc_weight": 0.50,
+    "market_fc_weight":  0.50,
     "age_curve_method": "gompertz",
     "projection_years": [1, 2, 3, 5],
-    "positional_scarcity_enabled": True,
     "need_weight": 0.25,
     "trend_window_days": 30,
     "min_asset_value_for_trade": 300,
     "max_trade_complexity": 3,
+    # League-format multipliers applied to market price (NOT to intrinsic model).
+    # These reflect how league format shifts executed trade value, not player worth.
     "superflex_qb_premium": 1.14,
     "te_premium_base": 1.06,
     "pick_year_discount_rate": 0.88,
-    "rookie_contract_bonus": 0.05,
-    "veteran_contract_penalty": 0.03,
+    # Spread thresholds for buy / sell signals (% intrinsic vs market).
+    "buy_spread_threshold_pct":  8.0,
+    "sell_spread_threshold_pct": -8.0,
 }
 
 AGE_CURVES = {
@@ -68,12 +82,11 @@ AGE_CURVES = {
     "TE": {"peak": 27, "plateau_start": 24, "plateau_end": 30, "pre_slope": 0.030, "post_decay": 0.092, "gompertz_b": 9.5, "gompertz_c": 0.40},
 }
 
-POSITION_SCARCITY = {
-    "QB": {"elite_cutoff": 5, "starter_cutoff": 20, "scarcity_mult": 1.08},
-    "RB": {"elite_cutoff": 10, "starter_cutoff": 40, "scarcity_mult": 1.05},
-    "WR": {"elite_cutoff": 12, "starter_cutoff": 50, "scarcity_mult": 1.02},
-    "TE": {"elite_cutoff": 5, "starter_cutoff": 15, "scarcity_mult": 1.12},
-}
+
+# POSITION_SCARCITY static tier table removed.
+# Scarcity is now handled by valuation_engine.ScarcityModel using
+# replacement-level logic driven by actual league settings.
+# See valuation_engine._SCARCITY_PREMIUMS and LeagueSettings.replacement_rank.
 
 DRAFT_PICK_REGRESSION = {
     "1.01-1.03": {"hit_rate": 0.72, "bust_rate": 0.08, "avg_peak_val": 8200, "avg_peak_age": 24},
@@ -129,14 +142,30 @@ class PlayerValue:
     ktc_value: float | None
     fc_normalized: float | None
     ktc_normalized: float | None
-    source_disagreement_pct: float
-    consensus_raw: float
+    # sentiment_gap: informational only — how much KTC and FC disagree.
+    # Positive = community (KTC) higher than executed (FC); negative = reverse.
+    # NOT used to inflate or deflate the score.
+    sentiment_gap: float
     age_mult: float
     injury_status: str | None
+    # adjusted_value = market_price × league-format multipliers (TE premium,
+    # superflex QB, injury discount).  This is the price a player actually
+    # trades for in your specific league; used for trade math.
     adjusted_value: float
     tier: str
     trend_30d: int
     trend_7d: int
+    # Intrinsic model fields — set after build_valuation_results() runs.
+    market_price:      float = 0.0   # KTC + FC composite (pre-league-format)
+    intrinsic_value:   float = 0.0   # 3-yr PV model estimate (portfolio-calibrated)
+    spread:            float = 0.0   # intrinsic − market_price
+    spread_pct:        float = 0.0   # spread / market_price × 100
+    uncertainty_label: str   = ""    # "low" | "moderate" | "high"
+    bust_prob:         float = 0.0
+    elite_prob:        float = 0.0
+    buy_signal:        bool  = False
+    sell_signal:       bool  = False
+    # Projection fields — set by FutureValueProjector.
     future_value_1yr: float = 0.0
     future_value_2yr: float = 0.0
     future_value_3yr: float = 0.0
@@ -897,86 +926,165 @@ class ValueEngine:
         return "Stash"
 
     def build_consensus(self) -> dict[str, PlayerValue]:
-        fc_by_id = {x["sleeper_id"]: x for x in self.fc_data if x.get("sleeper_id")}
+        """Build player valuations using a layered market + intrinsic approach.
+
+        Market layer
+        ------------
+        ``adjusted_value`` = market composite (50 % KTC + 50 % FC, normalised)
+        × league-format multipliers (TE premium, superflex QB, injury status).
+
+        KTC and FC are treated as independent market-price signals.  Their
+        disagreement is recorded in ``sentiment_gap`` but does NOT directly
+        boost or penalise the market price.  The old ±4 %/−8 % bonuses were
+        arbitrary and are removed.
+
+        Age is intentionally excluded from adjusted_value.  KTC and FC already
+        embed age-based market perception implicitly; stacking an additional age
+        multiplier on top was double-counting.
+
+        Intrinsic layer
+        ---------------
+        ``intrinsic_value`` comes from valuation_engine.build_valuation_results():
+        a 3-year PV model using Gompertz age curves, survival probabilities,
+        role persistence, and a 12 % annual discount rate.
+
+        Spread = intrinsic_value − market_price.  Positive → model thinks the
+        market is underpricing the player; negative → overpriced.
+        """
+        fc_by_id   = {x["sleeper_id"]: x for x in self.fc_data if x.get("sleeper_id")}
         fc_by_name = {self.resolver.normalize(x["name"]): x for x in self.fc_data if x.get("name")}
         ktc_by_name = {self.resolver.normalize(x["name"]): x for x in self.ktc_data if x.get("name")}
-        fc_p90 = np.percentile([x["value"] for x in self.fc_data if x.get("value", 0) > 0], 90) if self.fc_data else 10000
-        ktc_p90 = np.percentile([x["value"] for x in self.ktc_data if x.get("value", 0) > 0], 90) if self.ktc_data else 10000
+
+        fc_p90  = np.percentile([x["value"] for x in self.fc_data  if x.get("value", 0) > 0], 90) if self.fc_data  else 10_000
+        ktc_p90 = np.percentile([x["value"] for x in self.ktc_data if x.get("value", 0) > 0], 90) if self.ktc_data else 10_000
+
         out: dict[str, PlayerValue] = {}
         temp_by_pos: dict[str, list[tuple[str, float]]] = {"QB": [], "RB": [], "WR": [], "TE": []}
+
         for pid, p in self.all_players.items():
+            pos = p["position"]
+
+            # --- resolve to FC and KTC records ---
             fc = fc_by_id.get(pid)
             if fc is None:
                 m = self.resolver.resolve(p["full_name"], fc_by_name)
                 fc = fc_by_name.get(self.resolver.normalize(m)) if m else None
-            m2 = self.resolver.resolve(p["full_name"], ktc_by_name)
+            m2  = self.resolver.resolve(p["full_name"], ktc_by_name)
             ktc = ktc_by_name.get(self.resolver.normalize(m2)) if m2 else None
+
             if not fc and not ktc:
                 continue
-            fc_raw = float(fc["value"]) if fc else None
+
+            fc_raw  = float(fc["value"])  if fc  else None
             ktc_raw = float(ktc["value"]) if ktc else None
-            fcn = fc_raw * (10000 / max(fc_p90, 1)) if fc_raw is not None else None
-            ktcn = ktc_raw * (10000 / max(ktc_p90, 1)) if ktc_raw is not None else None
+
+            # Normalise both sources to the same ~10 000-point scale
+            fcn  = fc_raw  * (10_000 / max(fc_p90,  1)) if fc_raw  is not None else None
+            ktcn = ktc_raw * (10_000 / max(ktc_p90, 1)) if ktc_raw is not None else None
+
+            # Market composite: 50/50 blend; configurable but no sentiment boosts
             if fcn is not None and ktcn is not None:
-                consensus = CONFIG["fc_weight"] * fcn + CONFIG["ktc_weight"] * ktcn
+                market_composite = (
+                    CONFIG["market_ktc_weight"] * ktcn
+                    + CONFIG["market_fc_weight"] * fcn
+                )
+                sentiment_gap = (ktcn - fcn) / max(ktcn, fcn, 1.0)
+            elif fcn is not None:
+                market_composite, sentiment_gap = fcn, 0.0
             else:
-                consensus = fcn if fcn is not None else ktcn
-            if consensus is None:
+                market_composite, sentiment_gap = ktcn, 0.0  # type: ignore[assignment]
+
+            if market_composite is None:
                 continue
-            disagreement = 0.0
-            if fcn and ktcn:
-                disagreement = abs(fcn - ktcn) / max(fcn, ktcn)
-                if disagreement > 0.35:
-                    # When FC > KTC: player undervalued by KTC community, apply small boost
-                    # When KTC > FC: player overvalued vs real-world performance, apply penalty
-                    if fcn > ktcn:
-                        consensus *= 1.04
-                    else:
-                        consensus *= 0.92
-            age = p.get("age")
-            am = age_multiplier(p["position"], age, CONFIG["age_curve_method"])
-            val = consensus * am
-            if p["position"] == "TE":
-                val *= CONFIG["te_premium_base"] + 0.015 * min(self.meta["te_premium"], 2.5)
-            if p["position"] == "QB" and self.meta["is_superflex"]:
+
+            # League-format multipliers adjust the market price to reflect how
+            # a specific league structure changes what players actually trade for.
+            # Injury discounts are market-observable, so they belong here too.
+            val = market_composite
+            if pos == "TE":
+                val *= CONFIG["te_premium_base"] + 0.015 * min(self.meta.get("te_premium", 0.0), 2.5)
+            if pos == "QB" and self.meta.get("is_superflex"):
                 val *= CONFIG["superflex_qb_premium"]
-            if p.get("years_exp", 0) <= 3 and p.get("draft_year"):
-                val *= 1 + CONFIG["rookie_contract_bonus"]
-            peak = AGE_CURVES[p["position"]]["peak"]
-            if age and age > peak + 3:
-                val *= max(0.45, 1 - CONFIG["veteran_contract_penalty"] * (age - peak - 3))
             inj = p.get("injury_status")
             val *= {"IR": 0.88, "O": 0.88, "Q": 0.97, "D": 0.91}.get(inj, 1.0)
+
+            am = age_multiplier(pos, p.get("age"), CONFIG["age_curve_method"])
+
             pv = PlayerValue(
-                id=pid,
-                name=p["full_name"],
-                position=p["position"],
-                team=p.get("team", "FA"),
-                age=age,
-                years_exp=int(p.get("years_exp", 0)),
-                fc_value=fc_raw,
-                ktc_value=ktc_raw,
-                fc_normalized=fcn,
-                ktc_normalized=ktcn,
-                source_disagreement_pct=disagreement * 100,
-                consensus_raw=consensus,
-                age_mult=am,
-                injury_status=inj,
-                adjusted_value=val,
-                tier=self._tier(val),
-                trend_30d=int(fc.get("trend_30day", 0) if fc else 0),
-                trend_7d=int(fc.get("trend_7day", 0) if fc else 0),
+                id             = pid,
+                name           = p["full_name"],
+                position       = pos,
+                team           = p.get("team", "FA"),
+                age            = p.get("age"),
+                years_exp      = int(p.get("years_exp", 0)),
+                fc_value       = fc_raw,
+                ktc_value      = ktc_raw,
+                fc_normalized  = fcn,
+                ktc_normalized = ktcn,
+                sentiment_gap  = round(sentiment_gap, 4),
+                age_mult       = am,
+                injury_status  = inj,
+                adjusted_value = val,
+                market_price   = round(market_composite, 1),
+                tier           = self._tier(val),
+                trend_30d      = int(fc.get("trend_30day", 0) if fc else 0),
+                trend_7d       = int(fc.get("trend_7day",  0) if fc else 0),
             )
             out[pid] = pv
-            temp_by_pos[p["position"]].append((pid, val))
+            temp_by_pos[pos].append((pid, val))
+
+        # --- Intrinsic model (portfolio-level via valuation_engine) ---
+        # Build position rank percentiles for each player (needed by IntrinsicModel).
+        position_rank_data: dict[str, dict[str, Any]] = {}
         for pos, arr in temp_by_pos.items():
             arr.sort(key=lambda x: x[1], reverse=True)
-            for idx, (pid, _) in enumerate(arr, start=1):
-                if CONFIG["positional_scarcity_enabled"]:
-                    sc = POSITION_SCARCITY[pos]
-                    mult = sc["scarcity_mult"] if idx <= sc["elite_cutoff"] else (1 + (sc["scarcity_mult"] - 1) * 0.5 if idx <= sc["starter_cutoff"] else 1.0)
-                    out[pid].adjusted_value *= mult
-                    out[pid].tier = self._tier(out[pid].adjusted_value)
+            n = max(len(arr), 1)
+            for rank_idx, (pid, _) in enumerate(arr, start=1):
+                position_rank_data[pid] = {
+                    "position_rank":     rank_idx,
+                    "position_rank_pct": (rank_idx - 1) / n,
+                }
+
+        league_settings = LeagueSettings.from_meta(self.meta)
+
+        intrinsic_inputs = []
+        for pid, pv in out.items():
+            peak_age = AGE_CURVES.get(pv.position, AGE_CURVES["WR"])["peak"]
+            r_info   = position_rank_data.get(pid, {"position_rank": 99, "position_rank_pct": 0.5})
+            intrinsic_inputs.append({
+                "id":                  pid,
+                "position":            pv.position,
+                "age":                 pv.age or float(peak_age),
+                "peak_age":            peak_age,
+                "position_rank":       r_info["position_rank"],
+                "position_rank_pct":   r_info["position_rank_pct"],
+                "ktc_normalized":      pv.ktc_normalized,
+                "fc_normalized":       pv.fc_normalized,
+            })
+
+        def _age_mult_fn(position: str, age: float) -> float:
+            return age_multiplier(position, age, CONFIG["age_curve_method"])
+
+        vr_map = build_valuation_results(intrinsic_inputs, _age_mult_fn, league_settings)
+
+        for pid, vr in vr_map.items():
+            if pid not in out:
+                continue
+            pv = out[pid]
+            pv.intrinsic_value   = vr.intrinsic_value
+            pv.spread            = vr.spread
+            pv.spread_pct        = vr.spread_pct
+            pv.confidence_low    = vr.confidence_low
+            pv.confidence_high   = vr.confidence_high
+            pv.uncertainty_label = vr.uncertainty_label
+            pv.bust_prob         = vr.bust_prob
+            pv.elite_prob        = vr.elite_prob
+            pv.buy_signal        = vr.buy_signal
+            pv.sell_signal       = vr.sell_signal
+            # Apply scarcity to adjusted_value (league-format × scarcity premium)
+            pv.adjusted_value   *= vr.scarcity_mult
+            pv.tier              = self._tier(pv.adjusted_value)
+
         return out
 
 
@@ -1143,23 +1251,52 @@ class TradeEngine:
         return dedup
 
     def compute_buy_sell_targets(self) -> tuple[list[dict], list[dict]]:
+        """Surface buy and sell opportunities based on model-vs-market spread.
+
+        Buy  = model thinks player is undervalued (intrinsic > market) AND
+               short-term momentum is negative (falling market price = entry point).
+        Sell = model thinks player is overvalued (market > intrinsic) AND
+               short-term momentum is non-negative (near peak market price = exit).
+
+        The spread threshold is driven by valuation_engine constants, not
+        arbitrary hardcoded percentages.
+        """
         sell = []
         for p in self.my.players:
-            if p.adjusted_value <= 0:
+            if p.adjusted_value <= 0 or p.spread_pct == 0.0:
                 continue
-            score = (p.adjusted_value - p.future_value_1yr) / p.adjusted_value
-            if score > 0.12 and p.trend_30d >= 0:
-                sell.append({"name": p.name, "score": score, "current": p.adjusted_value, "future": p.future_value_1yr})
+            # Sell when model says overvalued and player is at or near peak trend
+            if p.sell_signal and p.trend_30d >= 0:
+                sell.append({
+                    "name":       p.name,
+                    "score":      p.spread_pct,     # negative → how overvalued
+                    "current":    p.adjusted_value,
+                    "future":     p.future_value_1yr,
+                    "spread_pct": p.spread_pct,
+                    "intrinsic":  p.intrinsic_value,
+                    "uncertainty": p.uncertainty_label,
+                })
+
         buy = []
         for opp in self.all:
             for p in opp.players:
-                if p.adjusted_value <= 0:
+                if p.adjusted_value <= 0 or p.spread_pct == 0.0:
                     continue
-                score = (p.future_value_2yr - p.adjusted_value) / p.adjusted_value
-                if score > 0.15 and p.trend_30d < 0:
-                    buy.append({"name": p.name, "owner": opp.owner_name, "score": score, "current": p.adjusted_value, "future": p.future_value_2yr})
+                # Buy when model says undervalued and market price is declining
+                if p.buy_signal and p.trend_30d < 0:
+                    buy.append({
+                        "name":       p.name,
+                        "owner":      opp.owner_name,
+                        "score":      p.spread_pct,  # positive → how undervalued
+                        "current":    p.adjusted_value,
+                        "future":     p.future_value_2yr,
+                        "spread_pct": p.spread_pct,
+                        "intrinsic":  p.intrinsic_value,
+                        "uncertainty": p.uncertainty_label,
+                    })
+
         buy.sort(key=lambda x: x["score"], reverse=True)
-        sell.sort(key=lambda x: x["score"], reverse=True)
+        sell.sort(key=lambda x: x["score"])           # most overvalued first
         return buy[:8], sell[:8]
 
 
