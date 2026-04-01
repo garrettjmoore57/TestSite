@@ -857,62 +857,181 @@ class KTCClient:
                 self.ktc_by_normalized_name[self.resolver.normalize(rec["name"])] = rec
         return out
 
+    def _try_ktc_direct_api(self, is_superflex: bool) -> dict | None:
+        """Strategy 1: Direct HTML parse with enhanced headers (fastest)."""
+        format_id = 2 if is_superflex else 1
+        url = f"https://keeptradecut.com/dynasty-rankings?page=0&filters=QB|WR|RB|TE|RDP&format={format_id}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://keeptradecut.com/",
+            "Cache-Control": "no-cache",
+        }
+        try:
+            resp = requests.get(url, headers=headers, timeout=15)
+            if resp.status_code != 200:
+                return None
+            # KTC embeds player data as a JS variable in the HTML
+            patterns = [
+                r'var playerValues\s*=\s*(\[.*?\]);',
+                r'window\.__playerValues\s*=\s*(\[.*?\]);',
+                r'"players"\s*:\s*(\[.*?\])\s*[,}]',
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, resp.text, re.DOTALL)
+                if match:
+                    try:
+                        players_raw = json.loads(match.group(1))
+                        return {
+                            p["playerName"]: {
+                                "name": p.get("playerName", ""),
+                                "position": p.get("position", ""),
+                                "team": p.get("team"),
+                                "superFlex_value": p.get("superFlexValues", {}).get("value", p.get("value", 0)),
+                                "oneQB_value": p.get("value", p.get("superFlexValues", {}).get("value", 0)),
+                                "value": p.get("superFlexValues", {}).get("value", p.get("value", 0)),
+                                "age": p.get("age"),
+                                "rank": p.get("rank"),
+                                "trend_7day": p.get("trend_7day"),
+                            }
+                            for p in players_raw
+                            if "playerName" in p
+                        }
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+        except Exception as e:
+            console.print(f"[dim][KTC Strategy 1 failed][/dim] {type(e).__name__}")
+        return None
+
+    def _try_ktc_cloudscraper(self, is_superflex: bool) -> dict | None:
+        """Strategy 2: cloudscraper (handles Cloudflare JS challenges)."""
+        try:
+            import cloudscraper
+        except ImportError:
+            return None
+        try:
+            scraper = cloudscraper.create_scraper(
+                browser={"browser": "chrome", "platform": "windows", "desktop": True}
+            )
+            format_id = 2 if is_superflex else 1
+            url = f"https://keeptradecut.com/dynasty-rankings?page=0&filters=QB|WR|RB|TE|RDP&format={format_id}"
+            resp = scraper.get(url, timeout=20)
+            if resp.status_code != 200:
+                return None
+            patterns = [
+                r'var playerValues\s*=\s*(\[.*?\]);',
+                r'window\.__playerValues\s*=\s*(\[.*?\]);',
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, resp.text, re.DOTALL)
+                if match:
+                    try:
+                        players_raw = json.loads(match.group(1))
+                        return {
+                            p["playerName"]: {
+                                "name": p.get("playerName", ""),
+                                "position": p.get("position", ""),
+                                "team": p.get("team"),
+                                "superFlex_value": p.get("superFlexValues", {}).get("value", p.get("value", 0)),
+                                "oneQB_value": p.get("value", p.get("superFlexValues", {}).get("value", 0)),
+                                "value": p.get("superFlexValues", {}).get("value", p.get("value", 0)),
+                                "age": p.get("age"),
+                                "rank": p.get("rank"),
+                                "trend_7day": p.get("trend_7day"),
+                            }
+                            for p in players_raw
+                            if "playerName" in p
+                        }
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+        except Exception as e:
+            console.print(f"[dim][KTC Strategy 2 failed][/dim] {type(e).__name__}")
+        return None
+
+    def _try_ktc_playwright(self, is_superflex: bool) -> dict | None:
+        """Strategy 3: Playwright stealth (most reliable CF bypass)."""
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            return None
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True, args=[
+                    "--no-sandbox",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",
+                ])
+                ctx = browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                               "AppleWebKit/537.36 (KHTML, like Gecko) "
+                               "Chrome/122.0.0.0 Safari/537.36",
+                    viewport={"width": 1280, "height": 800},
+                )
+                # Remove webdriver fingerprint
+                ctx.add_init_script("""
+                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                    window.chrome = { runtime: {} };
+                """)
+                page = ctx.new_page()
+                format_id = 2 if is_superflex else 1
+                url = f"https://keeptradecut.com/dynasty-rankings?page=0&filters=QB|WR|RB|TE|RDP&format={format_id}"
+                page.goto(url, wait_until="networkidle", timeout=30000)
+                time.sleep(2)  # Let JS execute fully
+                content = page.content()
+                browser.close()
+
+                for pattern in [r'var playerValues\s*=\s*(\[.*?\]);']:
+                    match = re.search(pattern, content, re.DOTALL)
+                    if match:
+                        try:
+                            players_raw = json.loads(match.group(1))
+                            return {
+                                p["playerName"]: {
+                                    "name": p.get("playerName", ""),
+                                    "position": p.get("position", ""),
+                                    "team": p.get("team"),
+                                    "superFlex_value": p.get("superFlexValues", {}).get("value", p.get("value", 0)),
+                                    "oneQB_value": p.get("value", p.get("superFlexValues", {}).get("value", 0)),
+                                    "value": p.get("superFlexValues", {}).get("value", p.get("value", 0)),
+                                    "age": p.get("age"),
+                                    "rank": p.get("rank"),
+                                    "trend_7day": p.get("trend_7day"),
+                                }
+                                for p in players_raw
+                                if "playerName" in p
+                            }
+                        except (json.JSONDecodeError, KeyError):
+                            continue
+        except Exception as e:
+            console.print(f"[dim][KTC Strategy 3 failed][/dim] {type(e).__name__}")
+        return None
+
     def fetch_values(self, is_superflex: bool) -> list[dict]:
+        """Fetch KTC values with 4-strategy fallback (handles Cloudflare)."""
         sf = "true" if is_superflex else "false"
         key = f"ktc_{sf}"
         cached = self.cache.get(key)
         if cached:
             return self._parse(cached, is_superflex)
-        urls = [
-            f"https://keeptradecut.com/api/players?format={'2' if is_superflex else '1'}",
-            f"https://keeptradecut.com/dynasty-rankings/json?superFlex={sf}&format=json",
-            f"https://keeptradecut.com/dynasty-rankings?format=json&superFlex={sf}",
+
+        strategies = [
+            ("Direct HTML parse", lambda: self._try_ktc_direct_api(is_superflex)),
+            ("CloudScraper", lambda: self._try_ktc_cloudscraper(is_superflex)),
+            ("Playwright stealth", lambda: self._try_ktc_playwright(is_superflex)),
         ]
-        for u in urls:
-            try:
-                data = self.http.get(
-                    u,
-                    source_name="KTC",
-                    allow_non_json=False,
-                    headers={
-                        "User-Agent": "Mozilla/5.0",
-                        "Accept": "application/json",
-                        "Referer": "https://keeptradecut.com/",
-                    },
-                )
-                parsed = self._parse(data, is_superflex)
-                if parsed:
-                    self.cache.set(key, data)
-                    return parsed
-            except Exception:
-                continue
-        try:
-            html = self.http.get(
-                "https://keeptradecut.com/dynasty-rankings",
-                source_name="KTC",
-                allow_non_json=True,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.119 Safari/537.36",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                    "Accept-Language": "en-US,en;q=0.9",
-                    "Accept-Encoding": "gzip, deflate, br",
-                    "Connection": "keep-alive",
-                    "Sec-Fetch-Dest": "document",
-                    "Sec-Fetch-Mode": "navigate",
-                    "Referer": "https://www.google.com/",
-                },
-            )
-            patterns = [r"var\s+(?:playerData|rankings|dynastyRankings|ktcData)\s*=\s*(\[.*?\]);"]
-            for pat in patterns:
-                m = re.search(pat, html, re.DOTALL)
-                if m:
-                    data = json.loads(m.group(1))
-                    parsed = self._parse(data, is_superflex)
-                    if parsed:
-                        self.cache.set(key, data)
-                        return parsed
-        except Exception:
-            pass
+
+        for name, strategy in strategies:
+            console.print(f"[dim][KTC] Trying: {name}...[/dim]")
+            result = strategy()
+            if result and len(result) > 50:  # sanity check: real data has 500+ players
+                console.print(f"[green][KTC] ✅ Success via {name} ({len(result)} players loaded)[/green]")
+                self.cache.set(key, result)
+                return self._parse(result, is_superflex)
+            console.print(f"[dim][KTC] ✗ {name} returned insufficient data[/dim]")
+
         console.print(
             "[yellow]⚠️ [KTC] Unable to fetch data (network issue, site blocked, or unavailable). "
             "Using FantasyCalc values only for this analysis. Intrinsic model remains unaffected.[/yellow]"
