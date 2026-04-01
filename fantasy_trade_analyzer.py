@@ -45,8 +45,8 @@ CONFIG: dict[str, Any] = {
     "min_trade_value_gain": 250,
     "max_players_to_send": 3,
     "top_n_trades": 25,
-    "fc_weight": 0.60,
-    "ktc_weight": 0.40,
+    "fc_weight": 0.35,
+    "ktc_weight": 0.65,
     "age_curve_method": "gompertz",
     "projection_years": [1, 2, 3, 5],
     "positional_scarcity_enabled": True,
@@ -927,7 +927,12 @@ class ValueEngine:
             if fcn and ktcn:
                 disagreement = abs(fcn - ktcn) / max(fcn, ktcn)
                 if disagreement > 0.35:
-                    consensus *= 0.92
+                    # When FC > KTC: player undervalued by KTC community, apply small boost
+                    # When KTC > FC: player overvalued vs real-world performance, apply penalty
+                    if fcn > ktcn:
+                        consensus *= 1.04
+                    else:
+                        consensus *= 0.92
             age = p.get("age")
             am = age_multiplier(p["position"], age, CONFIG["age_curve_method"])
             val = consensus * am
