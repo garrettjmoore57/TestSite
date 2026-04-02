@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -20,6 +20,11 @@ st.set_page_config(
 )
 
 # ── import core logic from original script ────────────────────────────────────
+from dynasty_custom_score import (  # noqa: E402
+    apply_custom_scores_to_player_values,
+    projection_curve_label,
+    roster_action_label,
+)
 from fantasy_trade_analyzer import (  # noqa: E402
     CONFIG,
     CacheManager,
@@ -41,21 +46,42 @@ from fantasy_trade_analyzer import (  # noqa: E402
 st.markdown(
     """
     <style>
-    [data-testid="stSidebar"] { background: #0d0d1a; }
-    [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 { color: #e0e0ff; }
-    .block-container { padding-top: 1.5rem; max-width: 1200px; }
-    .stTabs [data-baseweb="tab"] {
-        font-size: 0.88rem;
-        font-weight: 600;
-        padding: 8px 16px;
+    :root {
+      --ff-bg: #0b0b0c;
+      --ff-panel: #141416;
+      --ff-orange: #ff6a00;
+      --ff-orange-dim: #cc5500;
+      --ff-text: #f4f4f5;
+      --ff-muted: #a1a1aa;
     }
-    .stTabs [data-baseweb="tab-list"] { gap: 2px; }
+    .stApp { background: var(--ff-bg); color: var(--ff-text); }
+    [data-testid="stSidebar"] {
+      background: linear-gradient(180deg, #0e0e10 0%, #0a0a0b 100%);
+      border-right: 1px solid #222;
+    }
+    [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 { color: var(--ff-orange); }
+    [data-testid="stSidebar"] .stMarkdown, [data-testid="stSidebar"] label { color: var(--ff-muted); }
+    .block-container { padding-top: 1.25rem; max-width: 1280px; }
+    h1, h2, h3 { color: var(--ff-text) !important; letter-spacing: -0.02em; }
+    div[data-testid="stDecoration"] { background: var(--ff-orange); }
+    .stTabs [data-baseweb="tab"] {
+        font-size: 0.85rem;
+        font-weight: 700;
+        padding: 10px 14px;
+        color: var(--ff-muted);
+    }
+    .stTabs [aria-selected="true"] { color: var(--ff-orange) !important; }
+    .stTabs [data-baseweb="tab-list"] { gap: 4px; background: var(--ff-panel); border-radius: 8px; padding: 4px; }
     .trade-block {
-        background: #12121e;
-        border: 1px solid #2a2a3a;
-        border-radius: 10px;
+        background: var(--ff-panel);
+        border: 1px solid #2a2a2e;
+        border-radius: 12px;
         padding: 1.2rem;
         margin-bottom: 1rem;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+    }
+    @media (max-width: 768px) {
+      .block-container { padding-left: 1rem !important; padding-right: 1rem !important; }
     }
     </style>
     """,
@@ -70,7 +96,7 @@ with st.sidebar:
 
     st.markdown("### League Settings")
     username = st.text_input("Sleeper Username", placeholder="your_sleeper_username")
-    season = st.selectbox("Season", ["2025", "2024"])
+    season = st.selectbox("Season", ["2026", "2025", "2024"])
 
     st.divider()
     st.markdown("### Analysis Settings")
@@ -101,6 +127,30 @@ with st.sidebar:
 for key in ("leagues", "data", "state", "user_id"):
     if key not in st.session_state:
         st.session_state[key] = None
+
+
+def _trim_fc_history_for_sparkline(raw: list[dict], days: int = 28, max_points: int = 10) -> list[dict]:
+    """Turn FantasyCalc daily history into a short series for charts (~last month)."""
+    if not raw:
+        return []
+    rows: list[dict[str, float | str]] = []
+    for x in raw:
+        d_raw, v = x.get("date"), x.get("value")
+        if d_raw is None or v is None:
+            continue
+        ds = str(d_raw)[:10]
+        try:
+            rows.append({"date": ds, "value": float(v)})
+        except (TypeError, ValueError):
+            continue
+    rows.sort(key=lambda r: str(r["date"]))
+    cutoff = (datetime.now(UTC) - timedelta(days=days)).date().isoformat()
+    rows = [r for r in rows if str(r["date"]) >= cutoff]
+    if len(rows) > max_points:
+        step = max(1, len(rows) // max_points)
+        rows = rows[::step]
+    return rows[-max_points:]
+
 
 # ── analysis helper ───────────────────────────────────────────────────────────
 
@@ -199,6 +249,23 @@ def do_analysis(
         profiles[0],
     )
 
+    # Rules-based 0–100 dynasty score (age, trend, team, draft capital, injury)
+    apply_custom_scores_to_player_values(player_values, all_players)
+
+    sparklines: dict[str, list[dict]] = {}
+    fc_hist = FantasyCalcClient(http, cache)
+
+    def _fetch_spark(pid: str) -> tuple[str, list[dict]]:
+        hist = fc_hist.fetch_historical_trend_cached(pid)
+        return pid, _trim_fc_history_for_sparkline(hist)
+
+    roster_ids = [p.id for p in my.players]
+    if roster_ids:
+        with ThreadPoolExecutor(max_workers=min(8, len(roster_ids))) as spark_pool:
+            for pid, series in spark_pool.map(_fetch_spark, roster_ids):
+                if series:
+                    sparklines[pid] = series
+
     ns = argparse.Namespace(max_send=max_s, min_gain=min_g, top=top)
     engine = TradeEngine(my, profiles, ns)
     recs = engine.generate_recommendations()
@@ -213,14 +280,19 @@ def do_analysis(
         "sell": sell,
         "player_values": player_values,
         "source_status": source_status,
+        "all_players": all_players,
+        "rosters": rosters,
+        "sparklines": sparklines,
     }
 
 
 # ── main header ───────────────────────────────────────────────────────────────
-st.title("FFPredict — Dynasty Decision Engine")
+st.markdown(
+    "<h1 style='margin-bottom:0.2rem;'>FFPredict <span style='color:#ff6a00;'>Dynasty</span> Lab</h1>",
+    unsafe_allow_html=True,
+)
 st.caption(
-    f"Market data: KTC (sentiment) · FantasyCalc (executed)  |  "
-    f"Intrinsic model: 3-yr PV · survival · replacement level  |  "
+    f"Market data: KTC (sentiment) · FantasyCalc (executed) · **DScore** = custom 0–100 dynasty rules  |  "
     f"{datetime.now().strftime('%B %d, %Y')}"
 )
 
@@ -349,6 +421,8 @@ buy = data["buy"]
 sell = data["sell"]
 player_values = data["player_values"]
 source_status = data["source_status"]
+sparklines = data.get("sparklines") or {}
+league_rosters = data.get("rosters") or []
 
 # ── top summary bar ───────────────────────────────────────────────────────────
 st.subheader(f"📊 {meta['league_name']}")
@@ -387,6 +461,8 @@ st.divider()
 # ── tabs ──────────────────────────────────────────────────────────────────────
 (
     tab_roster,
+    tab_trade_compare,
+    tab_waiver,
     tab_league,
     tab_trades,
     tab_buysell,
@@ -394,9 +470,11 @@ st.divider()
     tab_future,
     tab_needs,
 ) = st.tabs([
-    "📋 My Roster",
+    "📋 Dashboard",
+    "⚖️ Trade Analyzer",
+    "💎 Waiver Gems",
     "🏆 League Rankings",
-    "🔄 Trade Recommendations",
+    "🔄 Trade Ideas",
     "📈 Buy / Sell",
     "📉 Value Movers",
     "🔮 Future Projections",
@@ -417,19 +495,16 @@ with tab_roster:
     r5.metric("Pick Value", f"{my.pick_value:,.0f}")
 
     st.caption(
-        "**Market Price** = KTC + FantasyCalc composite (what the player actually trades for).  "
-        "**Intrinsic** = 3-yr present-value model estimate.  "
-        "**Spread** = Intrinsic − Market (positive = model thinks undervalued)."
+        "**DScore** = our 0–100 dynasty score (age, usage trend, team, rookie draft round, injury).  "
+        "**Market** = KTC + FantasyCalc.  **Intrinsic** = 3-yr PV model.  "
+        "**Action** = BUY / HOLD / SELL from model spread + DScore heuristics."
     )
 
-    players_sorted = sorted(my.players, key=lambda x: x.adjusted_value, reverse=True)
-
-    def _signal(p) -> str:
-        if p.buy_signal:
-            return "🔵 Buy"
-        if p.sell_signal:
-            return "🔴 Sell"
-        return "— Hold"
+    players_sorted = sorted(
+        my.players,
+        key=lambda x: (x.custom_dynasty_score, x.adjusted_value),
+        reverse=True,
+    )
 
     roster_rows = [
         {
@@ -438,11 +513,13 @@ with tab_roster:
             "Pos": p.position,
             "Team": p.team,
             "Age": round(p.age, 1) if p.age else None,
+            "DScore": round(p.custom_dynasty_score, 1),
+            "Action": roster_action_label(p.buy_signal, p.sell_signal, p.custom_dynasty_score, p.trend_30d),
             "Market": int(p.adjusted_value),
             "Intrinsic": int(p.intrinsic_value) if p.intrinsic_value else "—",
             "Spread %": f"{p.spread_pct:+.1f}%" if p.spread_pct else "—",
-            "Signal": _signal(p),
             "+1yr": int(p.future_value_1yr),
+            "+2yr": int(p.future_value_2yr),
             "+3yr": int(p.future_value_3yr),
             "FVS": round(p.fvs, 1),
             "Tier": p.tier,
@@ -455,35 +532,56 @@ with tab_roster:
 
     def _color_tier(val: str) -> str:
         return {
-            "Elite": "background-color:#5c4200; color:#FFD700",
-            "Star": "background-color:#2a2a2a; color:#C0C0C0",
-            "Starter": "background-color:#1a3a1a; color:#4CAF50",
-            "Flex": "background-color:#1a253a; color:#64b5f6",
-            "Depth": "background-color:#3a2a10; color:#FF9800",
-            "Stash": "background-color:#222; color:#9E9E9E",
+            "Elite": "background-color:#5c2e00; color:#ffb547",
+            "Star": "background-color:#2a2a2a; color:#e4e4e7",
+            "Starter": "background-color:#1a3a1a; color:#86efac",
+            "Flex": "background-color:#1a253a; color:#93c5fd",
+            "Depth": "background-color:#3a2a10; color:#fdba74",
+            "Stash": "background-color:#27272a; color:#a1a1aa",
         }.get(val, "")
 
     def _color_trend(val: int) -> str:
         if val > 0:
-            return "color:#22c55e; font-weight:bold"
+            return "color:#4ade80; font-weight:bold"
         if val < 0:
-            return "color:#ef4444; font-weight:bold"
+            return "color:#f87171; font-weight:bold"
         return ""
 
-    def _color_signal(val: str) -> str:
-        if "Buy" in str(val):
-            return "color:#60a5fa; font-weight:bold"
-        if "Sell" in str(val):
-            return "color:#f87171; font-weight:bold"
-        return "color:#6b7280"
+    def _color_action_cell(val: str) -> str:
+        if val == "BUY":
+            return "background-color:#14532d; color:#86efac; font-weight:700"
+        if val == "SELL":
+            return "background-color:#450a0a; color:#fca5a5; font-weight:700"
+        return "background-color:#3f3f0f; color:#facc15; font-weight:600"
 
     styled_roster = (
         df_roster.style
         .map(_color_tier, subset=["Tier"])
         .map(_color_trend, subset=["30d"])
-        .map(_color_signal, subset=["Signal"])
+        .map(_color_action_cell, subset=["Action"])
     )
     st.dataframe(styled_roster, width="stretch", hide_index=True)
+
+    st.subheader("4-week value trends (FantasyCalc)")
+    st.caption("Short sparklines from recent market clears — scroll in each chart on mobile.")
+    if not sparklines:
+        st.info("Charts load after analysis fetches history (one request per roster player, cached).", icon="📈")
+    else:
+        n = len(players_sorted)
+        for row_start in range(0, n, 2):
+            c_left, c_right = st.columns(2)
+            for col, idx in zip([c_left, c_right], [row_start, row_start + 1]):
+                if idx >= n:
+                    break
+                pl = players_sorted[idx]
+                ser = sparklines.get(pl.id, [])
+                with col:
+                    st.markdown(f"**{pl.name}** · {pl.position} · DScore {pl.custom_dynasty_score:.0f}")
+                    if ser:
+                        sdf = pd.DataFrame(ser)
+                        st.line_chart(sdf.set_index("date"), height=120)
+                    else:
+                        st.caption("No recent history")
 
     if my.picks:
         st.subheader("Draft Picks")
@@ -499,6 +597,128 @@ with tab_roster:
             for p in sorted(my.picks, key=lambda x: x.adjusted_value, reverse=True)
         ]
         st.dataframe(pd.DataFrame(pick_rows), width="stretch", hide_index=True)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB: TRADE ANALYZER (side-by-side packages)
+# ─────────────────────────────────────────────────────────────────────────────
+with tab_trade_compare:
+    st.subheader("Trade Analyzer")
+    st.caption(
+        "Pick players on each side (names must match the app’s player list).  "
+        "We compare **DScore**, **market** totals, and **future** columns (+1 / +2 / +3 years)."
+    )
+    by_name = {pv.name: pv for pv in player_values.values()}
+    all_names = sorted(by_name.keys())
+    side_a = st.multiselect("Your side (2–4 players)", all_names, max_selections=4)
+    side_b = st.multiselect("Their side (2–4 players)", all_names, max_selections=4)
+
+    if st.button("Compare trade", type="primary"):
+        if len(side_a) < 2 or len(side_b) < 2:
+            st.warning("Choose at least **two** players on **each** side (per your workflow).")
+        elif set(side_a) & set(side_b):
+            st.warning("A player cannot appear on both sides.")
+        else:
+            pa = [by_name[n] for n in side_a]
+            pb = [by_name[n] for n in side_b]
+
+            def _pack_rows(players: list, label: str) -> list[dict]:
+                out = []
+                for p in players:
+                    out.append({
+                        "Side": label,
+                        "Name": p.name,
+                        "Pos": p.position,
+                        "Age": round(p.age, 1) if p.age else None,
+                        "DScore": round(p.custom_dynasty_score, 1),
+                        "Market": int(p.adjusted_value),
+                        "2yr curve": projection_curve_label(p.adjusted_value, p.future_value_2yr),
+                        "+1yr": int(p.future_value_1yr),
+                        "+2yr": int(p.future_value_2yr),
+                        "+3yr": int(p.future_value_3yr),
+                    })
+                return out
+
+            left_df = pd.DataFrame(_pack_rows(pa, "You"))
+            right_df = pd.DataFrame(_pack_rows(pb, "Them"))
+            c_a, c_b = st.columns(2)
+            with c_a:
+                st.markdown("**You send**")
+                st.dataframe(left_df, width="stretch", hide_index=True)
+            with c_b:
+                st.markdown("**You receive**")
+                st.dataframe(right_df, width="stretch", hide_index=True)
+
+            sum_mkt_a = sum(p.adjusted_value for p in pa)
+            sum_mkt_b = sum(p.adjusted_value for p in pb)
+            sum_ds_a = sum(p.custom_dynasty_score for p in pa)
+            sum_ds_b = sum(p.custom_dynasty_score for p in pb)
+            sum_2_a = sum(p.future_value_2yr for p in pa)
+            sum_2_b = sum(p.future_value_2yr for p in pb)
+            delta_mkt = sum_mkt_b - sum_mkt_a
+            delta_ds = sum_ds_b - sum_ds_a
+            delta_2 = sum_2_b - sum_2_a
+            pct = 100.0 * delta_mkt / max(sum_mkt_a, 1.0)
+
+            st.divider()
+            verdict_box = st.container()
+            with verdict_box:
+                if abs(delta_mkt) < 150 and abs(delta_ds) < 8:
+                    verdict = "**Even-ish trade** on both market and DScore — preference comes down to roster construction."
+                    winner = "Toss-up"
+                elif delta_mkt > 0 and delta_ds >= 0:
+                    verdict = "**You win on paper** on current market and DScore totals — nice upside if the market is efficient."
+                    winner = "You"
+                elif delta_mkt < 0 and delta_ds <= 0:
+                    verdict = "**They win on paper** on market and DScore — be sure you are buying a narrative the model does not see."
+                    winner = "Them"
+                elif delta_mkt > 0 > delta_ds:
+                    verdict = "**You gain market now** but give up DScore — classic stars-for-youth / win-now tilt."
+                    winner = "You (market) / Them (DScore)"
+                else:
+                    verdict = "**You sacrifice some market** but gain DScore — rebuild / futures tilt."
+                    winner = "Them (market) / You (DScore)"
+
+                st.markdown(f"### Verdict: {winner}")
+                st.markdown(verdict)
+                st.metric("Market surplus (receive − send)", f"{delta_mkt:+,.0f} pts", f"{pct:+.1f}% vs your outgoing")
+                st.caption(
+                    f"DScore delta (receive − send): **{delta_ds:+.1f}**  ·  "
+                    f"+2yr projected market delta: **{delta_2:+,.0f}**"
+                )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB: WAIVER GEMS (unrostered in this league)
+# ─────────────────────────────────────────────────────────────────────────────
+with tab_waiver:
+    st.subheader("Waiver wire gems")
+    st.caption("Players valued in this league’s market who are **not** on any roster (including taxi/IR).")
+    rostered_ids: set[str] = set()
+    for r in league_rosters:
+        for key in ("players", "taxi", "reserve"):
+            for pid in r.get(key) or []:
+                rostered_ids.add(str(pid))
+    min_w = st.slider("Minimum market value to show", 200, 4000, 500, 50)
+    gems = [pv for pid, pv in player_values.items() if pid not in rostered_ids and pv.adjusted_value >= min_w]
+    gems.sort(key=lambda x: (x.custom_dynasty_score, x.adjusted_value), reverse=True)
+    if not gems:
+        st.info("No unrostered players met that threshold — lower the minimum or check league rosters.")
+    else:
+        gem_rows = [
+            {
+                "Name": g.name,
+                "Pos": g.position,
+                "Team": g.team,
+                "Age": round(g.age, 1) if g.age else None,
+                "DScore": round(g.custom_dynasty_score, 1),
+                "Market": int(g.adjusted_value),
+                "+1yr": int(g.future_value_1yr),
+                "+2yr": int(g.future_value_2yr),
+                "+3yr": int(g.future_value_3yr),
+                "2yr curve": projection_curve_label(g.adjusted_value, g.future_value_2yr),
+            }
+            for g in gems[:80]
+        ]
+        st.dataframe(pd.DataFrame(gem_rows), width="stretch", hide_index=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB: LEAGUE RANKINGS
