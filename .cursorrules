@@ -19,3 +19,14 @@ STACK (this repo):
 - Core logic in fantasy_trade_analyzer.py and valuation_engine.py
 - Custom 0–100 rules layer in dynasty_custom_score.py
 - Sleeper + FantasyCalc + KTC fetches with disk cache under .fantasy_cache (and local JSON history files); not browser localStorage
+
+GIT WORKFLOW (after each completed feature or coherent chunk of work):
+- Prefer a branch named `dev` (or a feature branch), not committing blindly straight to `main` unless the owner says otherwise.
+- Stage all changes: `git add .`
+- Commit with a clear, full-sentence message describing what changed and why.
+- Push to GitHub: `git push` (and `git push -u origin <branch>` when the branch is new).
+- If push fails (auth, no remote, conflicts), stop and explain what the owner must fix—do not force-push to `main`.
+
+SAFETY:
+- “Auto-run” / Yolo in Cursor and `claude --dangerously-skip-permissions` are owner-controlled; they are not set from this file.
+- Treat `main` as protected: use `dev` or feature branches for risky work; GitHub is the backup of last known good state.
