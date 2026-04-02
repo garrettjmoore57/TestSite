@@ -252,6 +252,8 @@ class PlayerValue:
     fvs_tier: str = ""
     confidence_low: float = 0.0
     confidence_high: float = 0.0
+    # Rules-based 0–100 score (age, trend, team, rookie draft slot, injury); see dynasty_custom_score.py
+    custom_dynasty_score: float = 0.0
 
 
 @dataclass
@@ -758,10 +760,17 @@ class SleeperClient:
             if status in {"Retired"}:
                 continue
             age = p.get("age") or self.get_player_age_precise(p)
+            dr_raw = p.get("draft_round")
+            try:
+                draft_round = int(dr_raw) if dr_raw is not None and str(dr_raw).strip() != "" else None
+            except (TypeError, ValueError):
+                draft_round = None
             rec = {
                 "id": str(pid), "full_name": p.get("full_name") or p.get("first_name", "") + " " + p.get("last_name", ""), "position": pos,
                 "team": p.get("team") or "FA", "age": age, "birth_date": p.get("birth_date"), "years_exp": int(p.get("years_exp") or 0),
-                "college": p.get("college"), "draft_pick": p.get("search_rank"), "draft_year": p.get("draft_year"), "injury_status": p.get("injury_status"),
+                "college": p.get("college"), "draft_pick": p.get("search_rank"), "draft_year": p.get("draft_year"),
+                "draft_round": draft_round,
+                "injury_status": p.get("injury_status"),
                 "status": status, "depth_chart_order": p.get("depth_chart_order"),
                 "search_full_name": re.sub(r"\s+", "", (p.get("full_name") or "").lower()),
             }
@@ -822,6 +831,16 @@ class FantasyCalcClient:
             return [{"date": x.get("date"), "value": x.get("value")} for x in data] if isinstance(data, list) else []
         except Exception:
             return []
+
+    def fetch_historical_trend_cached(self, player_sleeper_id: str) -> list[dict]:
+        """Cached FantasyCalc history (daily points) for sparklines."""
+        key = f"fc_history_{player_sleeper_id}_90d"
+        hit = self.cache.get(key)
+        if hit is not None:
+            return hit
+        rows = self.fetch_historical_trend(player_sleeper_id)
+        self.cache.set(key, rows)
+        return rows
 
 
 class KTCClient:
