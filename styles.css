@@ -494,10 +494,102 @@ a {
   padding: 1rem;
 }
 
+
+.tool-layout {
+  margin-top: 1.2rem;
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: 280px 1fr;
+}
+
+.tool-panel,
+.estimator-card,
+.tool-card {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem;
+}
+
+.tool-panel h3,
+.estimator-card h3,
+.tool-card h3 {
+  margin-top: 0;
+}
+
+.tool-panel label,
+.estimator-card label {
+  display: grid;
+  gap: 0.3rem;
+  margin-bottom: 0.7rem;
+  font-size: 0.92rem;
+}
+
+.tool-panel select,
+.estimator-card input,
+.estimator-card select {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.58rem 0.62rem;
+  font: inherit;
+  background: #fff;
+}
+
+.checkbox-row {
+  display: flex !important;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.tool-grid {
+  display: grid;
+  gap: 0.9rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.tool-card p {
+  color: var(--muted);
+  margin-bottom: 0.7rem;
+}
+
+.tool-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.8rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.estimator-grid {
+  margin-top: 1rem;
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.quote-items {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.quote-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.7rem;
+  color: var(--muted);
+}
+
+.quote-total {
+  margin-bottom: 0;
+}
+
 @media (max-width: 1024px) {
   .hero-grid,
   .contracts-wrap,
-  .footer-grid {
+  .footer-grid,
+  .tool-layout,
+  .estimator-grid {
     grid-template-columns: 1fr;
   }
 
@@ -507,6 +599,10 @@ a {
 
   .projects-grid {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .tool-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -543,7 +639,8 @@ a {
   .hero-metrics,
   .cards-grid,
   .collection-grid,
-  .projects-grid {
+  .projects-grid,
+  .tool-grid {
     grid-template-columns: 1fr;
   }
 }
