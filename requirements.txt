@@ -1,7 +1,0 @@
-requests>=2.31.0
-numpy>=1.26.0
-pandas>=2.1.0
-streamlit>=1.35.0
-rich>=13.0.0
-cloudscraper>=1.2.71
-playwright>=1.40.0
