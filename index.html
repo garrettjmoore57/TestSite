@@ -24,6 +24,7 @@
         <nav class="main-nav" id="primary-nav" aria-label="Primary">
           <a href="#solutions">Solutions</a>
           <a href="#collections">Collections</a>
+          <a href="#tools">Tools</a>
           <a href="#contracts">Contracts</a>
           <a href="#projects">Projects</a>
           <a href="#faq">FAQ</a>
@@ -131,6 +132,73 @@
                 <li>Storage wall systems</li>
                 <li>Premium upholstery programs</li>
               </ul>
+            </article>
+          </div>
+        </div>
+      </section>
+
+
+      <section id="tools" class="section section-light">
+        <div class="container">
+          <h2>Interactive Planning Tools</h2>
+          <p class="section-intro">Built from our advanced configurator experience, now presented in the premium Lone Star site style.</p>
+          <div class="tool-layout">
+            <aside class="tool-panel">
+              <h3>Product Filters</h3>
+              <label>Brand
+                <select id="filter-brand">
+                  <option value="All">All brands</option>
+                </select>
+              </label>
+              <label>Material
+                <select id="filter-material">
+                  <option value="All">All materials</option>
+                  <option value="Wood">Wood</option>
+                  <option value="Metal">Metal</option>
+                  <option value="Plastic">Plastic</option>
+                  <option value="Upholstered">Upholstered</option>
+                </select>
+              </label>
+              <label>Grade band
+                <select id="filter-grade">
+                  <option value="All">All grades</option>
+                  <option value="K-5">K-5</option>
+                  <option value="6-8">6-8</option>
+                  <option value="9-12">9-12</option>
+                  <option value="Higher Ed">Higher Ed</option>
+                </select>
+              </label>
+              <label class="checkbox-row"><input id="filter-ada" type="checkbox" /> ADA compliant only</label>
+              <button id="tool-reset" class="btn btn-secondary" type="button">Reset Filters</button>
+            </aside>
+
+            <div>
+              <p id="catalog-results" class="section-intro">Showing 0 products</p>
+              <div id="catalog-grid" class="tool-grid"></div>
+            </div>
+          </div>
+
+          <div class="estimator-grid">
+            <article class="estimator-card">
+              <h3>Quote Builder</h3>
+              <p class="section-intro">Add products to build a quick project quote summary.</p>
+              <div id="quote-items" class="quote-items"></div>
+              <p class="quote-total">Estimated subtotal: <strong id="quote-total">$0</strong></p>
+            </article>
+            <article class="estimator-card">
+              <h3>Budget Estimator</h3>
+              <p class="section-intro">A simplified version of our budget planning calculator from the full configurator.</p>
+              <label>Classrooms <input id="budget-classrooms" type="number" min="1" value="18" /></label>
+              <label>Students per classroom <input id="budget-students" type="number" min="1" value="24" /></label>
+              <label>Quality Tier
+                <select id="budget-tier">
+                  <option value="budget">Budget</option>
+                  <option value="standard" selected>Standard</option>
+                  <option value="premium">Premium</option>
+                </select>
+              </label>
+              <button id="run-budget" class="btn btn-primary" type="button">Calculate Budget</button>
+              <p id="budget-output" class="section-intro">Run the estimate to view projected spend.</p>
             </article>
           </div>
         </div>
